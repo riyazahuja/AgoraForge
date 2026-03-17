@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
-from gym import spaces
+from gymnasium import spaces
 
 from envs.multiagentenv import MultiAgentEnv
 from envs.vamp.config import VampConfig
@@ -51,18 +51,25 @@ class VampEnv(MultiAgentEnv):
 
         # Spaces
         self.observation_space = [
-            spaces.Box(low=-np.inf, high=np.inf,
-                       shape=(self.encoder.local_obs_dim,), dtype=np.float32)
+            spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.encoder.local_obs_dim,),
+                dtype=np.float32,
+            )
             for _ in range(self.n_agents)
         ]
         self.share_observation_space = [
-            spaces.Box(low=-np.inf, high=np.inf,
-                       shape=(self.encoder.global_obs_dim,), dtype=np.float32)
+            spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.encoder.global_obs_dim,),
+                dtype=np.float32,
+            )
             for _ in range(self.n_agents)
         ]
         self.action_space = [
-            spaces.Discrete(self.encoder.action_dim)
-            for _ in range(self.n_agents)
+            spaces.Discrete(self.encoder.action_dim) for _ in range(self.n_agents)
         ]
 
         # State (initialized in reset)
@@ -81,17 +88,17 @@ class VampEnv(MultiAgentEnv):
     def _get_env_state(self) -> dict:
         """Package current state for encoder."""
         return {
-            'config': self.cfg,
-            'graph': self.graph,
-            'libraries': self.libraries,
-            'public_library': self.public_library,
-            'market': self.market,
-            'query_models': self.query_models,
-            'jobs': self.jobs,
-            'cumulative_proof': self.cumulative_proof,
-            'cumulative_conj': self.cumulative_conj,
-            'query_responses': self.query_responses,
-            'timestep': self.timestep,
+            "config": self.cfg,
+            "graph": self.graph,
+            "libraries": self.libraries,
+            "public_library": self.public_library,
+            "market": self.market,
+            "query_models": self.query_models,
+            "jobs": self.jobs,
+            "cumulative_proof": self.cumulative_proof,
+            "cumulative_conj": self.cumulative_conj,
+            "query_responses": self.query_responses,
+            "timestep": self.timestep,
         }
 
     def reset(self):
@@ -117,7 +124,7 @@ class VampEnv(MultiAgentEnv):
 
         # Query models
         for i in range(self.n_agents):
-            self.query_models[i] = QueryModel.from_config(cfg)
+            self.query_models[i] = QueryModel.from_config(cfg, i, self.rng)
 
         # Jobs
         for i in range(self.n_agents):
@@ -141,8 +148,12 @@ class VampEnv(MultiAgentEnv):
         env_state = self._get_env_state()
 
         obs = np.zeros((self.n_agents, self.encoder.local_obs_dim), dtype=np.float32)
-        share_obs = np.zeros((self.n_agents, self.encoder.global_obs_dim), dtype=np.float32)
-        avail_actions = np.zeros((self.n_agents, self.encoder.action_dim), dtype=np.float32)
+        share_obs = np.zeros(
+            (self.n_agents, self.encoder.global_obs_dim), dtype=np.float32
+        )
+        avail_actions = np.zeros(
+            (self.n_agents, self.encoder.action_dim), dtype=np.float32
+        )
 
         global_enc = self.encoder.encode_global_obs(env_state)
         for i in range(self.n_agents):
@@ -154,13 +165,13 @@ class VampEnv(MultiAgentEnv):
 
     def _serialize_library(self, lib: Library) -> dict:
         return {
-            'concrete': sorted(int(phi) for phi in lib.concrete),
-            'resolved': [
+            "concrete": sorted(int(phi) for phi in lib.concrete),
+            "resolved": [
                 {
-                    'formula': int(phi),
-                    'deps': sorted(int(dep) for dep in info.deps),
-                    'solve_time': int(info.solve_time),
-                    'solver': int(info.solver),
+                    "formula": int(phi),
+                    "deps": sorted(int(dep) for dep in info.deps),
+                    "solve_time": int(info.solve_time),
+                    "solver": int(info.solver),
                 }
                 for phi, info in sorted(lib.resolved.items())
             ],
@@ -168,59 +179,127 @@ class VampEnv(MultiAgentEnv):
 
     def _serialize_position(self, pos) -> dict:
         return {
-            'target': int(pos.contract.target),
-            'deadline': int(pos.contract.deadline),
-            'loss': float(pos.contract.loss),
-            'side': pos.side,
-            'settled': bool(pos.settled),
-            'pnl': float(pos.pnl),
+            "target": int(pos.contract.target),
+            "deadline": int(pos.contract.deadline),
+            "loss": float(pos.contract.loss),
+            "side": pos.side,
+            "settled": bool(pos.settled),
+            "pnl": float(pos.pnl),
         }
 
     def _serialize_offer(self, offer_id: int, offer) -> dict:
         return {
-            'offer_id': int(offer_id),
-            'target': int(offer.contract.target),
-            'deadline': int(offer.contract.deadline),
-            'loss': float(offer.contract.loss),
-            'side': offer.side,
-            'price': float(offer.price),
-            'poster': int(offer.poster),
+            "offer_id": int(offer_id),
+            "target": int(offer.contract.target),
+            "deadline": int(offer.contract.deadline),
+            "loss": float(offer.contract.loss),
+            "side": offer.side,
+            "price": float(offer.price),
+            "poster": int(offer.poster),
+        }
+
+    def _query_diagnostics_for_agent(self, agent_id: int) -> dict:
+        """Compare the learned query model against the proof kernel."""
+        cfg = self.cfg
+        lib = self.libraries[agent_id]
+        qm = self.query_models[agent_id]
+        resolved = lib.resolved_formulas()
+
+        abs_all = []
+        sq_all = []
+        abs_feasible = []
+        sq_feasible = []
+        pred_all = []
+        true_all = []
+
+        for phi in range(cfg.F_size):
+            if lib.is_resolved(phi):
+                continue
+
+            deps = self.graph.get_deps(phi)
+            feasible = self.graph.is_true(phi) and deps.issubset(resolved)
+
+            for tau in cfg.budget_levels:
+                pred = qm.success_probability(self.graph, lib, phi, tau)
+                truth = self.proof_kernel.success_probability(
+                    agent_id, self.graph, lib, phi, tau
+                )
+                err = pred - truth
+                pred_all.append(pred)
+                true_all.append(truth)
+                abs_all.append(abs(err))
+                sq_all.append(err * err)
+                if feasible:
+                    abs_feasible.append(abs(err))
+                    sq_feasible.append(err * err)
+
+        def _mean(values):
+            return float(np.mean(values)) if values else 0.0
+
+        return {
+            "agent_id": int(agent_id),
+            "num_points_all": int(len(abs_all)),
+            "num_points_feasible": int(len(abs_feasible)),
+            "mean_pred_all": _mean(pred_all),
+            "mean_true_all": _mean(true_all),
+            "mae_all": _mean(abs_all),
+            "rmse_all": float(np.sqrt(_mean(sq_all))) if sq_all else 0.0,
+            "mae_feasible": _mean(abs_feasible),
+            "rmse_feasible": float(np.sqrt(_mean(sq_feasible))) if sq_feasible else 0.0,
         }
 
     def snapshot(self) -> dict:
         return {
-            'timestep': int(self.timestep),
-            'jobs': [
-                None if self.jobs[i] is None else {
-                    'type': self.jobs[i]['type'],
-                    'target': int(self.jobs[i]['target']),
-                    'tau_rem': int(self.jobs[i]['tau_rem']),
-                    'tau_eff': int(self.jobs[i]['tau_eff']),
-                }
+            "timestep": int(self.timestep),
+            "jobs": [
+                (
+                    None
+                    if self.jobs[i] is None
+                    else {
+                        "type": self.jobs[i]["type"],
+                        "target": int(self.jobs[i]["target"]),
+                        "tau_rem": int(self.jobs[i]["tau_rem"]),
+                        "tau_eff": int(self.jobs[i]["tau_eff"]),
+                    }
+                )
                 for i in range(self.n_agents)
             ],
-            'query_responses': [
-                None if self.query_responses[i] is None else {
-                    'formula': int(self.query_responses[i][0]),
-                    'p_hat': float(self.query_responses[i][1]),
-                    'tau_hat': float(self.query_responses[i][2]),
-                }
+            "query_responses": [
+                (
+                    None
+                    if self.query_responses[i] is None
+                    else {
+                        "formula": int(self.query_responses[i][0]),
+                        "p_hat": float(self.query_responses[i][1]),
+                        "tau_hat": float(self.query_responses[i][2]),
+                    }
+                )
                 for i in range(self.n_agents)
             ],
-            'agents': [
+            "query_model_quality": [
+                self._query_diagnostics_for_agent(i) for i in range(self.n_agents)
+            ],
+            "agents": [
                 {
-                    'agent_id': int(i),
-                    'cash': float(self.market.get_cash(i)),
-                    'worst_case_balance': float(self.market.worst_case_balance(i)),
-                    'positions': [self._serialize_position(pos) for pos in self.market.positions[i]],
-                    'library': self._serialize_library(self.libraries[i]),
-                    'cumulative_proof': [float(v) for v in self.cumulative_proof[i].tolist()],
-                    'cumulative_conj': [float(v) for v in self.cumulative_conj[i].tolist()],
+                    "agent_id": int(i),
+                    "cash": float(self.market.get_cash(i)),
+                    "worst_case_balance": float(self.market.worst_case_balance(i)),
+                    "positions": [
+                        self._serialize_position(pos)
+                        for pos in self.market.positions[i]
+                    ],
+                    "library": self._serialize_library(self.libraries[i]),
+                    "cumulative_proof": [
+                        float(v) for v in self.cumulative_proof[i].tolist()
+                    ],
+                    "cumulative_conj": [
+                        float(v) for v in self.cumulative_conj[i].tolist()
+                    ],
                 }
                 for i in range(self.n_agents)
             ],
-            'public_library': self._serialize_library(self.public_library),
-            'offers': [
+            "public_library": self._serialize_library(self.public_library),
+            "offers": [
                 self._serialize_offer(offer_id, self.market.offers[offer_id])
                 for offer_id in self.market.get_offer_ids_sorted()
             ],
@@ -229,13 +308,14 @@ class VampEnv(MultiAgentEnv):
     def describe_action(self, action_idx: int) -> dict:
         action = self.encoder.decode_action(int(action_idx))
         return {
-            'type': action.type,
-            'formula': None if action.formula is None else int(action.formula),
-            'budget': None if action.budget is None else int(action.budget),
-            'deadline': None if action.deadline is None else int(action.deadline),
-            'loss': None if action.loss is None else int(action.loss),
-            'side': action.side,
-            'offer_slot': None if action.offer_slot is None else int(action.offer_slot),
+            "type": action.type,
+            "formula": None if action.formula is None else int(action.formula),
+            "budget": None if action.budget is None else int(action.budget),
+            "deadline": None if action.deadline is None else int(action.deadline),
+            "loss": None if action.loss is None else int(action.loss),
+            "side": action.side,
+            "price": None if action.price is None else int(action.price),
+            "offer_slot": None if action.offer_slot is None else int(action.offer_slot),
         }
 
     def describe_actions(self, actions) -> List[dict]:
@@ -252,11 +332,14 @@ class VampEnv(MultiAgentEnv):
         """
         cfg = self.cfg
         cash_before = {i: self.market.get_cash(i) for i in range(self.n_agents)}
+        shaping_rewards = np.zeros(self.n_agents, dtype=np.float32)
 
         # Decode actions
         decoded = {}
         for i in range(self.n_agents):
-            action_idx = int(actions[i]) if hasattr(actions, '__getitem__') else int(actions)
+            action_idx = (
+                int(actions[i]) if hasattr(actions, "__getitem__") else int(actions)
+            )
             decoded[i] = self.encoder.decode_action(action_idx)
 
         # ── Stage I: Non-market actions ──
@@ -264,13 +347,21 @@ class VampEnv(MultiAgentEnv):
         # 1. Pre-update: process non-market actions
         for i in range(self.n_agents):
             action = decoded[i]
-            self._process_nonmarket_action(i, action)
+            newly_public = self._process_nonmarket_action(i, action)
+            if newly_public > 0 and cfg.publish_resolution_bonus > 0.0:
+                bonus = float(cfg.publish_resolution_bonus) * newly_public
+                shaping_rewards[i] += bonus
+                if self.n_agents > 1:
+                    penalty = bonus / (self.n_agents - 1)
+                    for j in range(self.n_agents):
+                        if j != i:
+                            shaping_rewards[j] -= penalty
 
         # 2. Decrement timers and check completions
         for i in range(self.n_agents):
             if self.jobs[i] is not None:
-                self.jobs[i]['tau_rem'] -= 1
-                if self.jobs[i]['tau_rem'] <= 0:
+                self.jobs[i]["tau_rem"] -= 1
+                if self.jobs[i]["tau_rem"] <= 0:
                     self._resolve_job(i)
 
         # 3. Update timestep
@@ -286,62 +377,88 @@ class VampEnv(MultiAgentEnv):
         for i in range(self.n_agents):
             action = decoded[i]
             self._process_market_action(i, action)
+            shaping_rewards[i] += self._action_shaping_reward(action)
 
         # Compute rewards
         rewards = np.zeros((self.n_agents, 1), dtype=np.float32)
+        economic_rewards = np.zeros(self.n_agents, dtype=np.float32)
         for i in range(self.n_agents):
-            rewards[i, 0] = self.market.get_cash(i) - cash_before[i]
+            economic_rewards[i] = self.market.get_cash(i) - cash_before[i]
+            rewards[i, 0] = economic_rewards[i] + shaping_rewards[i]
 
         # Check done
         done = self.timestep >= cfg.max_timestep
         dones = np.full((self.n_agents, 1), done, dtype=np.float32)
 
         # Info: list of dicts, one per agent; 'won' key for RolloutWorker compat
-        infos = [{'won': False} for _ in range(self.n_agents)]
+        infos = [
+            {
+                "won": False,
+                "economic_reward": float(economic_rewards[i]),
+                "shaping_reward": float(shaping_rewards[i]),
+            }
+            for i in range(self.n_agents)
+        ]
 
         # Observations
         obs, share_obs, avail_actions = self._get_observations()
 
         return obs, share_obs, rewards, dones, infos, avail_actions
 
-    def _process_nonmarket_action(self, agent_id: int, action) -> None:
-        """Process non-market portion of an agent's action."""
+    def _process_nonmarket_action(self, agent_id: int, action) -> int:
+        """Process non-market portion of an agent's action.
+
+        Returns the number of newly public resolutions created by a pub action.
+        """
         cfg = self.cfg
         lib = self.libraries[agent_id]
 
-        if action.type == 'prove' and self.jobs[agent_id] is None:
+        if action.type == "prove" and self.jobs[agent_id] is None:
             phi = action.formula
             tau = cfg.budget_levels[action.budget]
             self.jobs[agent_id] = {
-                'type': 'prove',
-                'target': phi,
-                'tau_rem': tau,
-                'tau_eff': tau,
+                "type": "prove",
+                "target": phi,
+                "tau_rem": tau,
+                "tau_eff": tau,
             }
-            self.cumulative_proof[agent_id][phi] += tau ** cfg.kappa
+            self.cumulative_proof[agent_id][phi] += tau**cfg.kappa
+            return 0
 
-        elif action.type == 'conj' and self.jobs[agent_id] is None:
+        elif action.type == "conj" and self.jobs[agent_id] is None:
             phi = action.formula
             tau = cfg.budget_levels[action.budget]
             self.jobs[agent_id] = {
-                'type': 'conj',
-                'target': phi,
-                'tau_rem': tau,
-                'tau_eff': tau,
+                "type": "conj",
+                "target": phi,
+                "tau_rem": tau,
+                "tau_eff": tau,
             }
-            self.cumulative_conj[agent_id][phi] += tau ** cfg.kappa
+            self.cumulative_conj[agent_id][phi] += tau**cfg.kappa
+            return 0
 
-        elif action.type == 'pub':
+        elif action.type == "pub":
             phi = action.formula
             if lib.is_resolved(phi):
                 closed_c, closed_r = lib.dependency_closure({phi})
+                newly_public = sorted(
+                    closed_r - self.public_library.resolved_formulas()
+                )
                 self.public_library.merge_from(lib, closed_c, closed_r)
+                for resolved_phi in newly_public:
+                    for qm in self.query_models.values():
+                        qm.observe_public_resolution(self.graph, resolved_phi)
+                return len(newly_public)
+            return 0
 
-        elif action.type == 'qry':
+        elif action.type == "qry":
             phi = action.formula
             qm = self.query_models[agent_id]
             p_hat, tau_hat = qm.query(self.graph, lib, phi)
             self.query_responses[agent_id] = (phi, p_hat, tau_hat)
+            return 0
+
+        return 0
 
     def _resolve_job(self, agent_id: int) -> None:
         """Resolve a completed job (timer reached 0)."""
@@ -350,27 +467,26 @@ class VampEnv(MultiAgentEnv):
             return
 
         lib = self.libraries[agent_id]
-        phi = job['target']
-        tau_eff = job['tau_eff']
+        phi = job["target"]
+        tau_eff = job["tau_eff"]
         qm = self.query_models[agent_id]
-        bucket = qm.bucket_map(self.graph, lib, phi)
 
-        if job['type'] == 'prove':
+        if job["type"] == "prove":
             success = self.proof_kernel.sample(
                 agent_id, self.graph, lib, phi, tau_eff, self.rng
             )
+            qm.observe_proof_result(self.graph, lib, phi, tau_eff, success)
             if success:
                 deps = self.graph.get_deps(phi)
                 lib.add_resolved(phi, deps, self.timestep, agent_id)
-            qm.update(bucket, int(tau_eff), success)
+                qm.observe_private_resolution(self.graph, phi)
 
-        elif job['type'] == 'conj':
+        elif job["type"] == "conj":
             success, proposal = self.conj_kernel.sample(
                 agent_id, self.graph, lib, phi, tau_eff, self.rng
             )
             if success and proposal is not None:
                 lib.add_concrete(proposal)
-            qm.update(bucket, int(tau_eff), success)
 
         self.jobs[agent_id] = None
 
@@ -378,38 +494,46 @@ class VampEnv(MultiAgentEnv):
         """Process market portion of an agent's action."""
         cfg = self.cfg
 
-        if action.type == 'create_post':
+        if action.type == "create_post":
             phi = action.formula
             deadline = cfg.deadline_levels[action.deadline]
             loss = cfg.loss_levels[action.loss]
             side = action.side
-            # Use middle price as default (price not in create action encoding)
-            price = cfg.price_levels[len(cfg.price_levels) // 2]
+            price = cfg.price_levels[action.price]
             self.market.create_and_post(
                 agent_id, phi, self.timestep + deadline, loss, side, price
             )
 
-        elif action.type == 'accept':
+        elif action.type == "accept":
             offer_ids = self.market.get_offer_ids_sorted()
             slot = action.offer_slot
             if slot < len(offer_ids):
                 self.market.accept_offer(agent_id, offer_ids[slot])
 
-        elif action.type == 'cancel':
+        elif action.type == "cancel":
             offer_ids = self.market.get_offer_ids_sorted()
             own_offers = [
-                oid for oid in offer_ids
-                if self.market.offers[oid].poster == agent_id
+                oid for oid in offer_ids if self.market.offers[oid].poster == agent_id
             ]
             slot = action.offer_slot
             if slot < len(own_offers):
                 self.market.cancel_offer(agent_id, own_offers[slot])
 
+    def _action_shaping_reward(self, action) -> float:
+        fee = float(self.cfg.operation_gas_fee)
+        if fee <= 0.0:
+            return 0.0
+        if action.type in {"noop", "market_noop"}:
+            return 0.0
+        return -fee
+
     # ── MultiAgentEnv interface ──
 
     def get_obs(self):
         env_state = self._get_env_state()
-        return [self.encoder.encode_local_obs(i, env_state) for i in range(self.n_agents)]
+        return [
+            self.encoder.encode_local_obs(i, env_state) for i in range(self.n_agents)
+        ]
 
     def get_obs_agent(self, agent_id):
         return self.encoder.encode_local_obs(agent_id, self._get_env_state())
@@ -425,7 +549,10 @@ class VampEnv(MultiAgentEnv):
 
     def get_avail_actions(self):
         env_state = self._get_env_state()
-        return [self.encoder.get_available_actions(i, env_state) for i in range(self.n_agents)]
+        return [
+            self.encoder.get_available_actions(i, env_state)
+            for i in range(self.n_agents)
+        ]
 
     def get_avail_agent_actions(self, agent_id):
         return self.encoder.get_available_actions(agent_id, self._get_env_state())

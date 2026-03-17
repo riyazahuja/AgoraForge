@@ -7,7 +7,7 @@ Action space layout (discrete indices):
     [2*F*B+1 .. 2*F*B+F]                Pub(phi)
     [2*F*B+F+1 .. 2*F*B+2F]             Qry(phi)
     [2*F*B+2F+1]                         MarketNoOp
-    [2*F*B+2F+2 .. +F*D*L*2]            CreatePost(phi, deadline, loss, side)
+    [2*F*B+2F+2 .. +F*D*L*P*2]          CreatePost(phi, deadline, loss, price, side)
     [next .. +MAX_OFFERS]                AcceptOffer(slot)
     [next .. +MAX_OWN_OFFERS]            CancelOffer(slot)
 
@@ -63,7 +63,7 @@ class VampEncoder:
         self._qry_end = self._qry_start + self.F
         self._market_noop = self._qry_end
         self._create_start = self._market_noop + 1
-        self._create_end = self._create_start + self.F * self.D * self.L * 2  # 2 sides
+        self._create_end = self._create_start + self.F * self.D * self.L * self.P * 2
         self._accept_start = self._create_end
         self._accept_end = self._accept_start + self.max_offers
         self._cancel_start = self._accept_end
@@ -138,12 +138,14 @@ class VampEncoder:
             idx = action_idx - self._create_start
             side_idx = idx % 2
             idx //= 2
+            price_idx = idx % self.P
+            idx //= self.P
             loss_idx = idx % self.L
             idx //= self.L
             deadline_idx = idx % self.D
             phi = idx // self.D
             side = 'long' if side_idx == 0 else 'short'
-            return VampAction('create_post', phi, None, deadline_idx, loss_idx, side, None, None)
+            return VampAction('create_post', phi, None, deadline_idx, loss_idx, side, price_idx, None)
 
         if self._accept_start <= action_idx < self._accept_end:
             slot = action_idx - self._accept_start
@@ -171,7 +173,13 @@ class VampEncoder:
             return self._market_noop
         if action.type == 'create_post':
             side_idx = 0 if action.side == 'long' else 1
-            idx = action.formula * self.D * self.L * 2 + action.deadline * self.L * 2 + action.loss * 2 + side_idx
+            idx = (
+                action.formula * self.D * self.L * self.P * 2
+                + action.deadline * self.L * self.P * 2
+                + action.loss * self.P * 2
+                + action.price * 2
+                + side_idx
+            )
             return self._create_start + idx
         if action.type == 'accept':
             return self._accept_start + action.offer_slot
@@ -340,8 +348,9 @@ class VampEncoder:
         if job is None:
             for phi in range(self.F):
                 for b in range(self.B):
-                    # Prove: must be true and deps resolved
-                    if graph.is_true(phi) and not lib.is_resolved(phi):
+                    # Prove: allow any unresolved target whose dependencies are currently met.
+                    # The proof kernel itself decides whether the attempt can succeed.
+                    if not lib.is_resolved(phi):
                         deps = graph.get_deps(phi)
                         if deps.issubset(lib.resolved_formulas()):
                             avail[self._prove_start + phi * self.B + b] = 1.0
@@ -366,9 +375,17 @@ class VampEncoder:
             for phi in range(self.F):
                 for d in range(self.D):
                     for l in range(self.L):
-                        for side_idx in range(2):
-                            idx = self._create_start + phi * self.D * self.L * 2 + d * self.L * 2 + l * 2 + side_idx
-                            avail[idx] = 1.0
+                        for p in range(self.P):
+                            for side_idx in range(2):
+                                idx = (
+                                    self._create_start
+                                    + phi * self.D * self.L * self.P * 2
+                                    + d * self.L * self.P * 2
+                                    + l * self.P * 2
+                                    + p * 2
+                                    + side_idx
+                                )
+                                avail[idx] = 1.0
 
         # Accept: available offer slots
         offer_ids = market.get_offer_ids_sorted()

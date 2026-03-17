@@ -26,6 +26,7 @@ class TrainerConfig:
     distributed = False
     rank = 0
     world_size = 1
+    use_distributed_sampler = True
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -72,7 +73,7 @@ class Trainer:
         )
 
     def _build_loader(self, dataset, epoch):
-        if self.config.distributed:
+        if self.config.distributed and self.config.use_distributed_sampler:
             sampler = DistributedSampler(
                 dataset,
                 num_replicas=self.config.world_size,

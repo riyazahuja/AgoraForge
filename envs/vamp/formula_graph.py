@@ -53,6 +53,18 @@ class FormulaGraph:
         """Return w(psi, phi)."""
         return self.utility_weights.get((psi, phi), 0.0)
 
+    def in_degree(self, phi: int) -> int:
+        """Number of direct dependencies of phi."""
+        return len(self.dependency_adj.get(phi, set()))
+
+    def out_degree(self, phi: int) -> int:
+        """Number of formulas that directly depend on phi."""
+        count = 0
+        for deps in self.dependency_adj.values():
+            if phi in deps:
+                count += 1
+        return count
+
     def ghost_formulas(self, concrete: Set[int]) -> Set[int]:
         """G(L) = F \\ C -- formulas not yet concrete."""
         return set(range(self.F_size)) - concrete

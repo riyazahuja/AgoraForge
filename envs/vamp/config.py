@@ -44,18 +44,28 @@ class VampConfig:
     phi_transform: str = 'identity'     # monotone transform for proposal scores ('identity' or 'log1p')
 
     # ── 1f. Query model hyperparameters ──
-    n_buckets: int = 4                  # |B^alpha| (same for all agents)
-    horizon_H: int = 20                 # finite horizon H
-    prior_a: float = 0.5               # pseudocount a (uniform across bucket-time pairs)
-    prior_c: float = 1.0               # pseudocount c
+    n_buckets: int = 4                  # legacy field; no longer used by the parametric surrogate
+    horizon_H: int = 20                 # finite horizon H used for query readout
+    prior_a: float = 0.5               # legacy field; no longer used by the parametric surrogate
+    prior_c: float = 1.0               # legacy field; no longer used by the parametric surrogate
+    query_init_weight_std: float = 2.0
+    query_global_lr: float = 0.03
+    query_local_lr: float = 0.15
+    query_private_truth_boost: float = 2.0
+    query_public_truth_boost: float = 2.5
 
     # ── 1g. Market mechanism (Mechanism I: Collateralized Bilateral Contracts) ──
     budget_levels: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
     deadline_levels: List[int] = field(default_factory=lambda: [10, 25, 50])
     loss_levels: List[float] = field(default_factory=lambda: [0.25, 0.5])
-    price_levels: List[float] = field(default_factory=lambda: [0.1, 0.3, 0.5, 0.7, 0.9])
+    price_levels: List[float] = field(default_factory=lambda: [0.1 * i for i in range(1, 11)])
     max_offers: int = 8                 # max open offers in ledger
     max_own_offers: int = 4             # max offers per agent
+
+    # Optional training-side shaping. These default to zero so the base game
+    # remains unchanged unless explicitly enabled.
+    operation_gas_fee: float = 0.0
+    publish_resolution_bonus: float = 0.0
 
     # ── 1h. Implementation-side action simplification ──
     h_max: int = 0                      # query antecedent-width bound
@@ -83,6 +93,10 @@ class VampConfig:
         assert self.lambda_diff > 0, f"lambda_diff must be > 0, got {self.lambda_diff}"
         assert self.alpha_util >= 1.0, f"alpha_util must be >= 1, got {self.alpha_util}"
         assert self.beta_conj >= 1.0, f"beta_conj must be >= 1, got {self.beta_conj}"
+        assert self.operation_gas_fee >= 0.0, \
+            f"operation_gas_fee must be >= 0, got {self.operation_gas_fee}"
+        assert self.publish_resolution_bonus >= 0.0, \
+            f"publish_resolution_bonus must be >= 0, got {self.publish_resolution_bonus}"
         assert self.phi_transform in ('identity', 'log1p'), \
             f"phi_transform must be 'identity' or 'log1p', got {self.phi_transform}"
 

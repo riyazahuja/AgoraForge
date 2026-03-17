@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 
 import numpy as np
 import torch
@@ -26,7 +27,7 @@ from models.gpt_model import GPT, GPTConfig
 from framework.buffer import ReplayBuffer, StateActionReturnDataset
 from framework.rollout import RolloutWorker
 from framework.trainer import Trainer, TrainerConfig
-from framework.trajectory_logging import write_trajectory_artifacts
+from framework.trajectory_logging import summarize_query_model_diagnostics, write_trajectory_artifacts
 from framework.utils import set_seed, unwrap_model, padding_ava
 
 
@@ -51,6 +52,8 @@ def random_rollout(env, n_agents, action_dim):
     available_actions = padding_ava(available_actions, action_dim)
 
     T_rewards = 0.0
+    T_economic_rewards = 0.0
+    T_shaping_rewards = 0.0
     episode_dones = np.zeros(env.n_threads)
 
     while True:
@@ -63,19 +66,30 @@ def random_rollout(env, n_agents, action_dim):
                     valid_ids = np.arange(avail.shape[0])
                 action[n, a, 0] = np.random.choice(valid_ids)
 
-        _, _, rewards, dones, _, available_actions = env.real_env.step(action)
+        _, _, rewards, dones, infos, available_actions = env.real_env.step(action)
         available_actions = padding_ava(available_actions, action_dim)
 
         for n in range(env.n_threads):
             if not episode_dones[n]:
                 T_rewards += np.mean(rewards[n])
+                econ_step = 0.0
+                shape_step = 0.0
+                for a in range(n_agents):
+                    econ_step += float(infos[n][a].get("economic_reward", rewards[n, a, 0]))
+                    shape_step += float(infos[n][a].get("shaping_reward", 0.0))
+                T_economic_rewards += econ_step / n_agents
+                T_shaping_rewards += shape_step / n_agents
                 if np.all(dones[n]):
                     episode_dones[n] = 1
 
         if np.all(episode_dones):
             break
 
-    return T_rewards / env.n_threads
+    return (
+        T_rewards / env.n_threads,
+        T_economic_rewards / env.n_threads,
+        T_shaping_rewards / env.n_threads,
+    )
 
 
 def parse_args():
@@ -97,6 +111,20 @@ def parse_args():
     # Query model
     parser.add_argument('--n_buckets', type=int, default=4, help='Query model buckets')
     parser.add_argument('--horizon_H', type=int, default=20, help='Query model horizon')
+    parser.add_argument('--query_init_weight_std', type=float, default=2.0,
+                        help='Stddev of the initial global feature weights for the query model')
+    parser.add_argument('--query_global_lr', type=float, default=0.03,
+                        help='Global feature-model learning rate for the query model')
+    parser.add_argument('--query_local_lr', type=float, default=0.15,
+                        help='Per-formula residual learning rate for the query model')
+    parser.add_argument('--query_private_truth_boost', type=float, default=2.0,
+                        help='Truth-belief boost after a private proof succeeds')
+    parser.add_argument('--query_public_truth_boost', type=float, default=2.5,
+                        help='Truth-belief boost after a public proof is observed')
+    parser.add_argument('--operation_gas_fee', type=float, default=0.0,
+                        help='Optional per-action gas fee applied to any non-noop action')
+    parser.add_argument('--publish_resolution_bonus', type=float, default=0.0,
+                        help='Optional zero-sum shaping bonus per newly public resolution')
 
     # Architecture
     parser.add_argument('--context_length', type=int, default=1, help='Transformer context length')
@@ -120,7 +148,7 @@ def parse_args():
 
     # Online (always)
     parser.add_argument('--online_buffer_size', type=int, default=4,
-                        help='Number of parallel envs for online training')
+                        help='Total number of parallel envs for online training; split evenly across ranks in distributed mode')
     parser.add_argument('--online_epochs', type=int, default=100,
                         help='Number of online training epochs')
     parser.add_argument('--online_ppo_epochs', type=int, default=5,
@@ -171,6 +199,13 @@ def build_config(args) -> VampConfig:
         beta_conj=args.beta_conj,
         n_buckets=args.n_buckets,
         horizon_H=args.horizon_H,
+        query_init_weight_std=args.query_init_weight_std,
+        query_global_lr=args.query_global_lr,
+        query_local_lr=args.query_local_lr,
+        query_private_truth_boost=args.query_private_truth_boost,
+        query_public_truth_boost=args.query_public_truth_boost,
+        operation_gas_fee=args.operation_gas_fee,
+        publish_resolution_bonus=args.publish_resolution_bonus,
     )
 
 
@@ -218,7 +253,10 @@ def setup_runtime(args):
 def cleanup_runtime(runtime):
     if runtime['distributed'] and dist.is_initialized():
         try:
-            dist.barrier()
+            if runtime['backend'] == "nccl" and runtime['device'].type == "cuda":
+                dist.barrier(device_ids=[runtime['local_rank']])
+            else:
+                dist.barrier()
         except RuntimeError:
             pass
         dist.destroy_process_group()
@@ -291,7 +329,45 @@ def build_models(args, cfg, local_obs_dim, global_obs_dim, action_dim):
 
 def maybe_barrier(runtime):
     if runtime['distributed']:
-        dist.barrier()
+        if runtime['backend'] == "nccl" and runtime['device'].type == "cuda":
+            dist.barrier(device_ids=[runtime['local_rank']])
+        else:
+            dist.barrier()
+
+
+def reduce_tensor(runtime, values, op="mean"):
+    tensor = torch.as_tensor(values, dtype=torch.float64, device=runtime['device'])
+    if runtime['distributed']:
+        if op == "mean":
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= runtime['world_size']
+        elif op == "sum":
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        elif op == "max":
+            dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        else:
+            raise ValueError(f"unsupported reduce op: {op}")
+    return tensor
+
+
+def reduce_scalar(runtime, value, op="mean"):
+    return float(reduce_tensor(runtime, [value], op=op).item())
+
+
+def get_local_env_threads(total_env_threads, runtime):
+    if not runtime['distributed']:
+        return total_env_threads
+    if total_env_threads < runtime['world_size']:
+        raise ValueError(
+            f"online_buffer_size={total_env_threads} is smaller than world_size={runtime['world_size']}. "
+            "Increase online_buffer_size or reduce the number of ranks."
+        )
+    if total_env_threads % runtime['world_size'] != 0:
+        raise ValueError(
+            f"online_buffer_size={total_env_threads} must be divisible by world_size={runtime['world_size']} "
+            "so every rank performs the same number of rollout/training steps."
+        )
+    return total_env_threads // runtime['world_size']
 
 
 def main():
@@ -312,6 +388,13 @@ def main():
     if runtime['distributed']:
         rank0_print(runtime, f"Distributed training enabled across {runtime['world_size']} ranks")
 
+    local_online_buffer_size = get_local_env_threads(args.online_buffer_size, runtime)
+    global_online_buffer_size = local_online_buffer_size * runtime['world_size']
+    rank0_print(
+        runtime,
+        f"Online env threads: {local_online_buffer_size} per rank, {global_online_buffer_size} total",
+    )
+
     actor, critic = build_models(args, cfg, local_obs_dim, global_obs_dim, action_dim)
     actor = maybe_wrap_ddp(actor, runtime)
     critic = maybe_wrap_ddp(critic, runtime)
@@ -325,6 +408,7 @@ def main():
         distributed=runtime['distributed'],
         rank=runtime['rank'],
         world_size=runtime['world_size'],
+        use_distributed_sampler=runtime['distributed'],
     )
     online_trainer_config = TrainerConfig(
         max_epochs=args.online_ppo_epochs,
@@ -335,6 +419,7 @@ def main():
         distributed=runtime['distributed'],
         rank=runtime['rank'],
         world_size=runtime['world_size'],
+        use_distributed_sampler=False,
     )
     offline_trainer = Trainer(actor, critic, offline_trainer_config)
     online_trainer = Trainer(actor, critic, online_trainer_config)
@@ -346,17 +431,22 @@ def main():
     random_eval_env = None
     writer = None
 
+    buffer = ReplayBuffer(args.context_length * 3, global_obs_dim, local_obs_dim, action_dim)
+    rollout_worker = RolloutWorker(
+        unwrap_model(actor),
+        unwrap_model(critic),
+        buffer,
+        global_obs_dim,
+        local_obs_dim,
+        action_dim,
+    )
+    train_env = VampEnvWrapper(
+        local_online_buffer_size,
+        cfg,
+        seed=args.seed + 2000 + runtime['rank'] * 10000,
+    )
+
     if runtime['is_main']:
-        buffer = ReplayBuffer(args.context_length * 3, global_obs_dim, local_obs_dim, action_dim)
-        rollout_worker = RolloutWorker(
-            unwrap_model(actor),
-            unwrap_model(critic),
-            buffer,
-            global_obs_dim,
-            local_obs_dim,
-            action_dim,
-        )
-        train_env = VampEnvWrapper(args.online_buffer_size, cfg, seed=args.seed + 2000)
         eval_env = VampEnvWrapper(args.eval_episodes, cfg, seed=args.seed + 1000)
         random_eval_env = VampEnvWrapper(args.eval_episodes, cfg, seed=args.seed + 3000)
 
@@ -397,11 +487,19 @@ def main():
                 save_model_state(actor, os.path.join(args.save_dir, "actor_offline.pt"))
                 rank0_print(runtime, f"Saved offline checkpoint to {args.save_dir}/actor_offline.pt")
 
-                eval_return, eval_win_rate, _, _, _ = rollout_worker.rollout(
+                eval_return, eval_win_rate, _, _, _, eval_economic_return, eval_shaping_return, _, _ = rollout_worker.rollout(
                     eval_env, args.target_rtgs, train=False, capture_threads=0
                 )
-                rank0_print(runtime, f"Post-offline eval: return={eval_return:.3f}, win_rate={eval_win_rate:.3f}")
+                rank0_print(
+                    runtime,
+                    f"Post-offline eval: shaped_return={eval_return:.3f}, "
+                    f"economic_return={eval_economic_return:.3f}, "
+                    f"shaping_return={eval_shaping_return:.3f}, "
+                    f"win_rate={eval_win_rate:.3f}",
+                )
                 writer.add_scalar("offline/eval_return", eval_return, 0)
+                writer.add_scalar("offline/eval_economic_return", eval_economic_return, 0)
+                writer.add_scalar("offline/eval_shaping_return", eval_shaping_return, 0)
 
         rank0_print(runtime, f"\n=== Online MAPPO training ({args.online_epochs} epochs) ===")
         epoch_iterator = tqdm(
@@ -411,47 +509,72 @@ def main():
         )
 
         for epoch in epoch_iterator:
-            if runtime['is_main']:
-                debug_print(runtime, f"epoch {epoch}: starting rollout collection")
-                buffer.reset(buffer_size=5000)
-                train_return, train_win_rate, steps, train_agent_returns, _ = rollout_worker.rollout(
-                    train_env, args.target_rtgs, train=True, capture_threads=0
-                )
-                debug_print(runtime, f"epoch {epoch}: rollout collection complete")
-                dataset = buffer.sample()
-                debug_print(runtime, f"epoch {epoch}: buffer sample complete with {len(dataset)} items")
-                epoch_payload = {
-                    'dataset': dataset.to_dict(),
-                    'train_return': float(train_return),
-                    'train_win_rate': float(train_win_rate),
-                    'steps': int(steps),
-                    'train_agent_returns': [float(v) for v in train_agent_returns.tolist()],
-                }
-            else:
-                epoch_payload = None
+            epoch_start = time.perf_counter()
+            buffer.reset(buffer_size=5000)
+            rollout_start = time.perf_counter()
+            (
+                local_train_return,
+                local_train_win_rate,
+                local_steps,
+                local_train_agent_returns,
+                _,
+                local_train_economic_return,
+                local_train_shaping_return,
+                local_train_agent_economic_returns,
+                local_train_agent_shaping_returns,
+            ) = rollout_worker.rollout(
+                train_env, args.target_rtgs, train=True, capture_threads=0
+            )
+            dataset = buffer.sample()
+            rollout_time = time.perf_counter() - rollout_start
 
-            debug_print(runtime, f"epoch {epoch}: entering broadcast")
-            epoch_payload = broadcast_object(runtime, epoch_payload)
-            debug_print(runtime, f"epoch {epoch}: broadcast complete")
-            dataset = StateActionReturnDataset.from_dict(epoch_payload['dataset'])
-            debug_print(runtime, f"epoch {epoch}: trainer start")
+            train_start = time.perf_counter()
             actor_loss, critic_loss, entropy, ratio, confidence = online_trainer.train(
                 dataset, train_critic=True
             )
-            debug_print(runtime, f"epoch {epoch}: trainer complete")
+            train_time = time.perf_counter() - train_start
             maybe_barrier(runtime)
-            debug_print(runtime, f"epoch {epoch}: barrier complete")
+
+            train_return = reduce_scalar(runtime, local_train_return, op="mean")
+            train_economic_return = reduce_scalar(runtime, local_train_economic_return, op="mean")
+            train_shaping_return = reduce_scalar(runtime, local_train_shaping_return, op="mean")
+            train_win_rate = reduce_scalar(runtime, local_train_win_rate, op="mean")
+            steps = reduce_scalar(runtime, local_steps, op="sum")
+            train_agent_returns = reduce_tensor(runtime, local_train_agent_returns, op="mean").cpu().tolist()
+            train_agent_economic_returns = reduce_tensor(
+                runtime, local_train_agent_economic_returns, op="mean"
+            ).cpu().tolist()
+            train_agent_shaping_returns = reduce_tensor(
+                runtime, local_train_agent_shaping_returns, op="mean"
+            ).cpu().tolist()
+            rollout_time_max = reduce_scalar(runtime, rollout_time, op="max")
+            train_time_max = reduce_scalar(runtime, train_time, op="max")
+            samples_per_rank = len(dataset)
+            train_samples_global = int(round(reduce_scalar(runtime, samples_per_rank, op="sum")))
+            epoch_time = time.perf_counter() - epoch_start
 
             if runtime['is_main']:
-                train_return = epoch_payload['train_return']
-                train_win_rate = epoch_payload['train_win_rate']
-                train_agent_returns = epoch_payload['train_agent_returns']
-
                 writer.add_scalar("online/train_return", train_return, epoch)
+                writer.add_scalar("online/train_economic_return", train_economic_return, epoch)
+                writer.add_scalar("online/train_shaping_return", train_shaping_return, epoch)
                 writer.add_scalar("online/train_win_rate", train_win_rate, epoch)
-                writer.add_scalar("online/train_steps", epoch_payload['steps'], epoch)
+                writer.add_scalar("online/train_steps", steps, epoch)
+                writer.add_scalar("online/train_samples_global", train_samples_global, epoch)
+                writer.add_scalar("online/train_samples_per_rank", samples_per_rank, epoch)
+                writer.add_scalar("online/rollout_time_s", rollout_time_max, epoch)
+                writer.add_scalar("online/train_time_s", train_time_max, epoch)
                 for a in range(cfg.n_agents):
                     writer.add_scalar(f"online/train_return_agent{a}", train_agent_returns[a], epoch)
+                    writer.add_scalar(
+                        f"online/train_economic_return_agent{a}",
+                        train_agent_economic_returns[a],
+                        epoch,
+                    )
+                    writer.add_scalar(
+                        f"online/train_shaping_return_agent{a}",
+                        train_agent_shaping_returns[a],
+                        epoch,
+                    )
                 writer.add_scalar("online/actor_loss", actor_loss, epoch)
                 writer.add_scalar("online/critic_loss", critic_loss, epoch)
                 writer.add_scalar("online/entropy", entropy, epoch)
@@ -460,33 +583,96 @@ def main():
 
                 postfix = {
                     'train_ret': f"{train_return:.3f}",
+                    'train_econ': f"{train_economic_return:.3f}",
+                    'train_shape': f"{train_shaping_return:.3f}",
                     'actor_loss': f"{actor_loss:.4f}",
                     'critic_loss': f"{critic_loss:.4f}",
+                    'rollout_s': f"{rollout_time_max:.2f}",
+                    'train_s': f"{train_time_max:.2f}",
                 }
 
                 if (epoch + 1) % args.online_eval_interval == 0:
-                    eval_return, eval_win_rate, _, eval_agent_returns, trajectories = rollout_worker.rollout(
+                    debug_print(runtime, f"epoch {epoch}: eval start")
+                    eval_start = time.perf_counter()
+                    (
+                        eval_return,
+                        eval_win_rate,
+                        _,
+                        eval_agent_returns,
+                        trajectories,
+                        eval_economic_return,
+                        eval_shaping_return,
+                        eval_agent_economic_returns,
+                        eval_agent_shaping_returns,
+                    ) = rollout_worker.rollout(
                         eval_env,
                         args.target_rtgs,
                         train=False,
                         capture_threads=args.capture_eval_episodes,
                     )
+                    debug_print(runtime, f"epoch {epoch}: eval rollout complete")
+                    eval_time = time.perf_counter() - eval_start
                     writer.add_scalar("online/eval_return", eval_return, epoch)
+                    writer.add_scalar("online/eval_economic_return", eval_economic_return, epoch)
+                    writer.add_scalar("online/eval_shaping_return", eval_shaping_return, epoch)
                     writer.add_scalar("online/eval_win_rate", eval_win_rate, epoch)
+                    writer.add_scalar("online/eval_time_s", eval_time, epoch)
                     for a in range(cfg.n_agents):
                         writer.add_scalar(f"online/eval_return_agent{a}", eval_agent_returns[a], epoch)
+                        writer.add_scalar(
+                            f"online/eval_economic_return_agent{a}",
+                            eval_agent_economic_returns[a],
+                            epoch,
+                        )
+                        writer.add_scalar(
+                            f"online/eval_shaping_return_agent{a}",
+                            eval_agent_shaping_returns[a],
+                            epoch,
+                        )
 
-                    random_return = random_rollout(random_eval_env, cfg.n_agents, action_dim)
+                    debug_print(runtime, f"epoch {epoch}: random baseline start")
+                    random_return, random_economic_return, random_shaping_return = random_rollout(
+                        random_eval_env, cfg.n_agents, action_dim
+                    )
+                    debug_print(runtime, f"epoch {epoch}: random baseline complete")
                     writer.add_scalar("online/random_baseline_return", random_return, epoch)
+                    writer.add_scalar("online/random_baseline_economic_return", random_economic_return, epoch)
+                    writer.add_scalar("online/random_baseline_shaping_return", random_shaping_return, epoch)
                     writer.add_scalar("online/eval_minus_random", eval_return - random_return, epoch)
 
                     if trajectories:
+                        debug_print(runtime, f"epoch {epoch}: trajectory diagnostics start")
+                        query_quality = summarize_query_model_diagnostics(trajectories)
+                        for diag in query_quality:
+                            agent_id = diag["agent_id"]
+                            writer.add_scalar(
+                                f"online/query_model_mae_agent{agent_id}",
+                                diag["mae_all"],
+                                epoch,
+                            )
+                            writer.add_scalar(
+                                f"online/query_model_rmse_agent{agent_id}",
+                                diag["rmse_all"],
+                                epoch,
+                            )
+                            writer.add_scalar(
+                                f"online/query_model_feasible_mae_agent{agent_id}",
+                                diag["mae_feasible"],
+                                epoch,
+                            )
+                            writer.add_scalar(
+                                f"online/query_model_feasible_rmse_agent{agent_id}",
+                                diag["rmse_feasible"],
+                                epoch,
+                            )
+                        debug_print(runtime, f"epoch {epoch}: trajectory artifact write start")
                         artifacts = write_trajectory_artifacts(
                             trajectories,
                             output_dir=trajectory_dir,
                             split="eval",
                             epoch=epoch,
                         )
+                        debug_print(runtime, f"epoch {epoch}: trajectory artifact write complete")
                         writer.add_text(
                             "online/trajectory_artifacts",
                             "\n".join(item['html'] for item in artifacts),
@@ -495,22 +681,37 @@ def main():
 
                     postfix.update({
                         'eval_ret': f"{eval_return:.3f}",
+                        'eval_econ': f"{eval_economic_return:.3f}",
+                        'eval_shape': f"{eval_shaping_return:.3f}",
                         'random_ret': f"{random_return:.3f}",
+                        'rand_econ': f"{random_economic_return:.3f}",
+                        'eval_s': f"{eval_time:.2f}",
                     })
                     rank0_print(
                         runtime,
                         f"Epoch {epoch + 1}/{args.online_epochs}: "
-                        f"train_ret={train_return:.3f} eval_ret={eval_return:.3f} "
-                        f"random_ret={random_return:.3f} "
-                        f"actor_loss={actor_loss:.5f} critic_loss={critic_loss:.5f}"
+                        f"train_ret={train_return:.3f} train_econ={train_economic_return:.3f} "
+                        f"train_shape={train_shaping_return:.3f} "
+                        f"eval_ret={eval_return:.3f} eval_econ={eval_economic_return:.3f} "
+                        f"eval_shape={eval_shaping_return:.3f} "
+                        f"random_ret={random_return:.3f} random_econ={random_economic_return:.3f} "
+                        f"actor_loss={actor_loss:.5f} critic_loss={critic_loss:.5f} "
+                        f"rollout_s={rollout_time_max:.2f} train_s={train_time_max:.2f} "
+                        f"samples_global={train_samples_global}"
                     )
 
                     if eval_return > best_eval_return:
                         best_eval_return = eval_return
                         save_model_state(actor, os.path.join(args.save_dir, "actor_best.pt"))
                         save_model_state(critic, os.path.join(args.save_dir, "critic_best.pt"))
+                        debug_print(runtime, f"epoch {epoch}: best checkpoint saved")
 
+                writer.add_scalar("online/epoch_time_s", epoch_time, epoch)
                 epoch_iterator.set_postfix(postfix)
+
+            debug_print(runtime, f"epoch {epoch}: end-of-epoch barrier start")
+            maybe_barrier(runtime)
+            debug_print(runtime, f"epoch {epoch}: end-of-epoch barrier complete")
 
         if runtime['is_main']:
             save_model_state(actor, os.path.join(args.save_dir, "actor_final.pt"))

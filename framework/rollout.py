@@ -23,6 +23,10 @@ class RolloutWorker:
 
         T_rewards, T_wins, steps, episode_dones = 0.0, 0.0, 0, np.zeros(env.n_threads)
         T_agent_rewards = np.zeros(env.num_agents)
+        T_economic_rewards = 0.0
+        T_shaping_rewards = 0.0
+        T_agent_economic_rewards = np.zeros(env.num_agents)
+        T_agent_shaping_rewards = np.zeros(env.num_agents)
 
         obs, share_obs, available_actions = env.real_env.reset()
         obs = padding_obs(obs, self.local_obs_dim)
@@ -113,8 +117,18 @@ class RolloutWorker:
                 if not episode_dones[n]:
                     steps += 1
                     T_rewards += np.mean(rewards[n])
+                    economic_step = 0.0
+                    shaping_step = 0.0
                     for a in range(env.num_agents):
                         T_agent_rewards[a] += rewards[n, a, 0]
+                        economic_reward = float(infos[n][a].get('economic_reward', rewards[n, a, 0]))
+                        shaping_reward = float(infos[n][a].get('shaping_reward', 0.0))
+                        T_agent_economic_rewards[a] += economic_reward
+                        T_agent_shaping_rewards[a] += shaping_reward
+                        economic_step += economic_reward
+                        shaping_step += shaping_reward
+                    T_economic_rewards += economic_step / env.num_agents
+                    T_shaping_rewards += shaping_step / env.num_agents
                     if np.all(dones[n]):
                         episode_dones[n] = 1
                         if infos[n][0].get('won', False):
@@ -134,6 +148,20 @@ class RolloutWorker:
         aver_return = T_rewards / env.n_threads
         aver_win_rate = T_wins / env.n_threads
         aver_agent_returns = T_agent_rewards / env.n_threads
+        aver_economic_return = T_economic_rewards / env.n_threads
+        aver_shaping_return = T_shaping_rewards / env.n_threads
+        aver_agent_economic_returns = T_agent_economic_rewards / env.n_threads
+        aver_agent_shaping_returns = T_agent_shaping_rewards / env.n_threads
         self.model.train(True)
         self.critic_model.train(True)
-        return aver_return, aver_win_rate, steps, aver_agent_returns, trajectories
+        return (
+            aver_return,
+            aver_win_rate,
+            steps,
+            aver_agent_returns,
+            trajectories,
+            aver_economic_return,
+            aver_shaping_return,
+            aver_agent_economic_returns,
+            aver_agent_shaping_returns,
+        )

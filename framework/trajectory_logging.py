@@ -2,6 +2,48 @@ import json
 import os
 
 
+def summarize_query_model_diagnostics(trajectories):
+    if not trajectories:
+        return []
+
+    agent_totals = {}
+    for trajectory in trajectories:
+        for step in trajectory.get("steps", []):
+            for diag in step.get("state_before", {}).get("query_model_quality", []):
+                agent_id = int(diag["agent_id"])
+                totals = agent_totals.setdefault(
+                    agent_id,
+                    {
+                        "count": 0,
+                        "mae_all": 0.0,
+                        "rmse_all": 0.0,
+                        "mae_feasible": 0.0,
+                        "rmse_feasible": 0.0,
+                    },
+                )
+                totals["count"] += 1
+                totals["mae_all"] += float(diag.get("mae_all", 0.0))
+                totals["rmse_all"] += float(diag.get("rmse_all", 0.0))
+                totals["mae_feasible"] += float(diag.get("mae_feasible", 0.0))
+                totals["rmse_feasible"] += float(diag.get("rmse_feasible", 0.0))
+
+    summary = []
+    for agent_id in sorted(agent_totals):
+        totals = agent_totals[agent_id]
+        denom = max(totals["count"], 1)
+        summary.append(
+            {
+                "agent_id": agent_id,
+                "mae_all": totals["mae_all"] / denom,
+                "rmse_all": totals["rmse_all"] / denom,
+                "mae_feasible": totals["mae_feasible"] / denom,
+                "rmse_feasible": totals["rmse_feasible"] / denom,
+                "num_steps": totals["count"],
+            }
+        )
+    return summary
+
+
 def _trajectory_html_document(title, payload_json):
     return f"""<!doctype html>
 <html lang="en">
@@ -298,6 +340,11 @@ def _trajectory_html_document(title, payload_json):
         <div class="pill">done=${{step.done}}</div>
         <h3>Public Resolved</h3>
         <div>${{htmlList(step.state_after.public_library.resolved.map(item => item.formula))}}</div>
+        <h3>Query Model Quality</h3>
+        <div>${{htmlList((step.state_before.query_model_quality || []).map(diag =>
+          `agent ${{diag.agent_id}}: mae=${{diag.mae_all.toFixed(3)}} rmse=${{diag.rmse_all.toFixed(3)}} ` +
+          `(feasible mae=${{diag.mae_feasible.toFixed(3)}})`
+        ))}}</div>
         <h3>Jobs</h3>
         <div>${{htmlList(step.state_after.jobs.map((job, i) => job ? `agent ${{i}}: ${{job.type}} phi=${{job.target}} tau=${{job.tau_rem}}` : null).filter(Boolean), true)}}</div>
       `;

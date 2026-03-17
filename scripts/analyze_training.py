@@ -31,6 +31,8 @@ except ImportError:
 
 
 AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_return_agent(\d+)$")
+ECON_AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_economic_return_agent(\d+)$")
+QUERY_TAG_PATTERN = re.compile(r"online/query_model_(mae|rmse|feasible_mae|feasible_rmse)_agent(\d+)$")
 
 
 def load_scalar(ea: EventAccumulator, tag: str):
@@ -54,13 +56,16 @@ def load_all_seeds(results_dir: str):
     trajectory_artifacts = []
     tags_of_interest = {
         "online/eval_return",
+        "online/eval_economic_return",
         "online/random_baseline_return",
+        "online/random_baseline_economic_return",
         "online/eval_minus_random",
         "online/actor_loss",
         "online/critic_loss",
         "online/entropy",
         "online/confidence",
         "online/train_return",
+        "online/train_economic_return",
     }
 
     for sd in seed_dirs:
@@ -68,8 +73,12 @@ def load_all_seeds(results_dir: str):
         ea = EventAccumulator(path)
         ea.Reload()
         available = set(ea.Tags().get("scalars", []))
-        dynamic_agent_tags = {tag for tag in available if AGENT_TAG_PATTERN.match(tag)}
-        for tag in tags_of_interest | dynamic_agent_tags:
+        dynamic_agent_tags = {
+            tag for tag in available
+            if AGENT_TAG_PATTERN.match(tag) or ECON_AGENT_TAG_PATTERN.match(tag)
+        }
+        dynamic_query_tags = {tag for tag in available if QUERY_TAG_PATTERN.match(tag)}
+        for tag in tags_of_interest | dynamic_agent_tags | dynamic_query_tags:
             if tag in available:
                 steps, values = load_scalar(ea, tag)
                 all_data[tag].append((steps, values))
@@ -151,6 +160,105 @@ def plot_agent_returns(all_data, plots_dir):
     fig.savefig(os.path.join(plots_dir, "per_agent_returns.png"), dpi=150)
     plt.close(fig)
     print(f"Saved {plots_dir}/per_agent_returns.png")
+
+
+def plot_agent_economic_returns(all_data, plots_dir):
+    agent_tags = sorted(
+        [tag for tag in all_data if ECON_AGENT_TAG_PATTERN.match(tag)],
+        key=lambda tag: (
+            ECON_AGENT_TAG_PATTERN.match(tag).group(1),
+            int(ECON_AGENT_TAG_PATTERN.match(tag).group(2)),
+        ),
+    )
+    if not agent_tags:
+        return
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+
+    for mode_idx, mode in enumerate(["train", "eval"]):
+        ax = axes[mode_idx]
+        found = False
+        for color_idx, tag in enumerate(agent_tags):
+            match = ECON_AGENT_TAG_PATTERN.match(tag)
+            if match.group(1) != mode:
+                continue
+            steps, mean, std = align_and_aggregate(all_data[tag])
+            if steps is None:
+                continue
+            found = True
+            agent_idx = int(match.group(2))
+            plot_with_bands(
+                ax,
+                steps,
+                mean,
+                std,
+                label=f"Agent {agent_idx}",
+                color=colors[color_idx % len(colors)],
+            )
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Economic Return")
+        ax.set_title(f"Per-Agent {mode.title()} Economic Return")
+        ax.grid(True, alpha=0.3)
+        if found:
+            ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, "per_agent_economic_returns.png"), dpi=150)
+    plt.close(fig)
+    print(f"Saved {plots_dir}/per_agent_economic_returns.png")
+
+
+def plot_query_model_quality(all_data, plots_dir):
+    query_tags = sorted(
+        [tag for tag in all_data if QUERY_TAG_PATTERN.match(tag)],
+        key=lambda tag: (
+            QUERY_TAG_PATTERN.match(tag).group(1),
+            int(QUERY_TAG_PATTERN.match(tag).group(2)),
+        ),
+    )
+    if not query_tags:
+        return
+
+    metrics = [
+        ("mae", "All-Formula MAE"),
+        ("rmse", "All-Formula RMSE"),
+        ("feasible_mae", "Feasible-Only MAE"),
+        ("feasible_rmse", "Feasible-Only RMSE"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False)
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+
+    for ax, (metric_name, title) in zip(axes.flatten(), metrics):
+        found = False
+        for color_idx, tag in enumerate(query_tags):
+            match = QUERY_TAG_PATTERN.match(tag)
+            if match.group(1) != metric_name:
+                continue
+            steps, mean, std = align_and_aggregate(all_data[tag])
+            if steps is None:
+                continue
+            found = True
+            agent_idx = int(match.group(2))
+            plot_with_bands(
+                ax,
+                steps,
+                mean,
+                std,
+                label=f"Agent {agent_idx}",
+                color=colors[color_idx % len(colors)],
+            )
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Error")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        if found:
+            ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, "query_model_quality.png"), dpi=150)
+    plt.close(fig)
+    print(f"Saved {plots_dir}/query_model_quality.png")
 
 
 def write_trajectory_index(results_dir, trajectory_artifacts):
@@ -258,6 +366,8 @@ def main():
     print(f"Saved {plots_dir}/entropy.png")
 
     plot_agent_returns(all_data, plots_dir)
+    plot_agent_economic_returns(all_data, plots_dir)
+    plot_query_model_quality(all_data, plots_dir)
     write_trajectory_index(args.results_dir, trajectory_artifacts)
 
     summary_lines = []
@@ -299,6 +409,41 @@ def main():
         )
         if matched_tags:
             summary_lines.append(f"\n{label} Per-Agent Final Returns:")
+            for tag in matched_tags:
+                _, mean, _ = align_and_aggregate(all_data[tag])
+                if mean is not None:
+                    agent_idx = int(tag.rsplit("agent", 1)[1])
+                    summary_lines.append(f"  Agent {agent_idx}: {mean[-1]:.4f}")
+
+    for tag_prefix, label in [
+        ("online/train_economic_return_agent", "Train"),
+        ("online/eval_economic_return_agent", "Eval"),
+    ]:
+        matched_tags = sorted(
+            [tag for tag in all_data if tag.startswith(tag_prefix)],
+            key=lambda tag: int(tag.rsplit("agent", 1)[1]),
+        )
+        if matched_tags:
+            summary_lines.append(f"\n{label} Per-Agent Final Economic Returns:")
+            for tag in matched_tags:
+                _, mean, _ = align_and_aggregate(all_data[tag])
+                if mean is not None:
+                    agent_idx = int(tag.rsplit("agent", 1)[1])
+                    summary_lines.append(f"  Agent {agent_idx}: {mean[-1]:.4f}")
+
+    query_metric_labels = [
+        ("online/query_model_mae_agent", "Query Model Final MAE"),
+        ("online/query_model_rmse_agent", "Query Model Final RMSE"),
+        ("online/query_model_feasible_mae_agent", "Query Model Final Feasible MAE"),
+        ("online/query_model_feasible_rmse_agent", "Query Model Final Feasible RMSE"),
+    ]
+    for tag_prefix, label in query_metric_labels:
+        matched_tags = sorted(
+            [tag for tag in all_data if tag.startswith(tag_prefix)],
+            key=lambda tag: int(tag.rsplit("agent", 1)[1]),
+        )
+        if matched_tags:
+            summary_lines.append(f"\n{label}:")
             for tag in matched_tags:
                 _, mean, _ = align_and_aggregate(all_data[tag])
                 if mean is not None:
