@@ -100,6 +100,8 @@ def parse_args():
     parser.add_argument('--n_agents', type=int, default=2, help='Number of agents')
     parser.add_argument('--max_timestep', type=int, default=100, help='Episode length')
     parser.add_argument('--initial_cash', type=float, default=10.0, help='Starting cash per agent')
+    parser.add_argument('--initial_public_concrete_prob', type=float, default=0.25,
+                        help='Probability of seeding each negation pair as public concrete at reset')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
 
     # Kernels
@@ -125,6 +127,16 @@ def parse_args():
                         help='Optional per-action gas fee applied to any non-noop action')
     parser.add_argument('--publish_resolution_bonus', type=float, default=0.0,
                         help='Optional zero-sum shaping bonus per newly public resolution')
+    parser.add_argument('--target_init_prob', type=float, default=0.5,
+                        help='Probability of seeding a public concrete theorem with a static bounty offer')
+    parser.add_argument('--target_init_min_price', type=float, default=0.1,
+                        help='Minimum offer price for static bounty initialization')
+    parser.add_argument('--target_init_max_price', type=float, default=0.3,
+                        help='Maximum offer price for static bounty initialization')
+    parser.add_argument('--target_init_max_quantity', type=int, default=4,
+                        help='Maximum quantity for static bounty offers at reset')
+    parser.add_argument('--target_init_cash', type=float, default=100.0,
+                        help='Starting cash for the static bounty agent used to seed targets')
 
     # Architecture
     parser.add_argument('--context_length', type=int, default=1, help='Transformer context length')
@@ -192,6 +204,7 @@ def build_config(args) -> VampConfig:
         n_agents=args.n_agents,
         max_timestep=args.max_timestep,
         initial_cash=args.initial_cash,
+        initial_public_concrete_prob=args.initial_public_concrete_prob,
         gamma=args.gamma,
         kappa=args.kappa,
         lambda_diff=args.lambda_diff,
@@ -206,6 +219,11 @@ def build_config(args) -> VampConfig:
         query_public_truth_boost=args.query_public_truth_boost,
         operation_gas_fee=args.operation_gas_fee,
         publish_resolution_bonus=args.publish_resolution_bonus,
+        target_init_prob=args.target_init_prob,
+        target_init_min_price=args.target_init_min_price,
+        target_init_max_price=args.target_init_max_price,
+        target_init_max_quantity=args.target_init_max_quantity,
+        target_init_cash=args.target_init_cash,
     )
 
 
@@ -538,6 +556,9 @@ def main():
             train_return = reduce_scalar(runtime, local_train_return, op="mean")
             train_economic_return = reduce_scalar(runtime, local_train_economic_return, op="mean")
             train_shaping_return = reduce_scalar(runtime, local_train_shaping_return, op="mean")
+            train_total_return = train_return * cfg.n_agents
+            train_total_economic_return = train_economic_return * cfg.n_agents
+            train_total_shaping_return = train_shaping_return * cfg.n_agents
             train_win_rate = reduce_scalar(runtime, local_train_win_rate, op="mean")
             steps = reduce_scalar(runtime, local_steps, op="sum")
             train_agent_returns = reduce_tensor(runtime, local_train_agent_returns, op="mean").cpu().tolist()
@@ -557,6 +578,17 @@ def main():
                 writer.add_scalar("online/train_return", train_return, epoch)
                 writer.add_scalar("online/train_economic_return", train_economic_return, epoch)
                 writer.add_scalar("online/train_shaping_return", train_shaping_return, epoch)
+                writer.add_scalar("online/train_total_return", train_total_return, epoch)
+                writer.add_scalar(
+                    "online/train_total_economic_return",
+                    train_total_economic_return,
+                    epoch,
+                )
+                writer.add_scalar(
+                    "online/train_total_shaping_return",
+                    train_total_shaping_return,
+                    epoch,
+                )
                 writer.add_scalar("online/train_win_rate", train_win_rate, epoch)
                 writer.add_scalar("online/train_steps", steps, epoch)
                 writer.add_scalar("online/train_samples_global", train_samples_global, epoch)
@@ -615,6 +647,17 @@ def main():
                     writer.add_scalar("online/eval_return", eval_return, epoch)
                     writer.add_scalar("online/eval_economic_return", eval_economic_return, epoch)
                     writer.add_scalar("online/eval_shaping_return", eval_shaping_return, epoch)
+                    writer.add_scalar("online/eval_total_return", eval_return * cfg.n_agents, epoch)
+                    writer.add_scalar(
+                        "online/eval_total_economic_return",
+                        eval_economic_return * cfg.n_agents,
+                        epoch,
+                    )
+                    writer.add_scalar(
+                        "online/eval_total_shaping_return",
+                        eval_shaping_return * cfg.n_agents,
+                        epoch,
+                    )
                     writer.add_scalar("online/eval_win_rate", eval_win_rate, epoch)
                     writer.add_scalar("online/eval_time_s", eval_time, epoch)
                     for a in range(cfg.n_agents):
@@ -638,6 +681,17 @@ def main():
                     writer.add_scalar("online/random_baseline_return", random_return, epoch)
                     writer.add_scalar("online/random_baseline_economic_return", random_economic_return, epoch)
                     writer.add_scalar("online/random_baseline_shaping_return", random_shaping_return, epoch)
+                    writer.add_scalar("online/random_baseline_total_return", random_return * cfg.n_agents, epoch)
+                    writer.add_scalar(
+                        "online/random_baseline_total_economic_return",
+                        random_economic_return * cfg.n_agents,
+                        epoch,
+                    )
+                    writer.add_scalar(
+                        "online/random_baseline_total_shaping_return",
+                        random_shaping_return * cfg.n_agents,
+                        epoch,
+                    )
                     writer.add_scalar("online/eval_minus_random", eval_return - random_return, epoch)
 
                     if trajectories:

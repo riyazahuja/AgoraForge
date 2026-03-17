@@ -39,6 +39,12 @@ class RolloutWorker:
         cumulative_returns = {
             n: np.zeros(env.num_agents, dtype=np.float64) for n in capture_indices
         }
+        cumulative_economic_returns = {
+            n: np.zeros(env.num_agents, dtype=np.float64) for n in capture_indices
+        }
+        cumulative_shaping_returns = {
+            n: np.zeros(env.num_agents, dtype=np.float64) for n in capture_indices
+        }
         if capture_indices:
             snapshots = env.real_env.get_env_snapshots()
             for n in capture_indices:
@@ -98,12 +104,30 @@ class RolloutWorker:
                     if episode_dones[n]:
                         continue
                     cumulative_returns[n] += rewards[n, :, 0]
+                    economic_rewards = [
+                        float(infos[n][a].get('economic_reward', rewards[n, a, 0]))
+                        for a in range(env.num_agents)
+                    ]
+                    shaping_rewards = [
+                        float(infos[n][a].get('shaping_reward', 0.0))
+                        for a in range(env.num_agents)
+                    ]
+                    cumulative_economic_returns[n] += np.asarray(economic_rewards, dtype=np.float64)
+                    cumulative_shaping_returns[n] += np.asarray(shaping_rewards, dtype=np.float64)
                     item['steps'].append({
                         'step_index': int(len(item['steps'])),
                         'action_indices': [int(v) for v in action_indices[n].tolist()],
                         'actions': action_descriptions[n],
                         'rewards': [float(v) for v in rewards[n, :, 0].tolist()],
                         'cumulative_returns': [float(v) for v in cumulative_returns[n].tolist()],
+                        'economic_rewards': economic_rewards,
+                        'shaping_rewards': shaping_rewards,
+                        'cumulative_economic_returns': [
+                            float(v) for v in cumulative_economic_returns[n].tolist()
+                        ],
+                        'cumulative_shaping_returns': [
+                            float(v) for v in cumulative_shaping_returns[n].tolist()
+                        ],
                         'done': bool(np.all(dones[n])),
                         'state_before': pre_snapshots[n],
                         'state_after': post_snapshots[n],

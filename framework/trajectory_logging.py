@@ -172,6 +172,10 @@ def _trajectory_html_document(title, payload_json):
       <svg id="returnsChart" viewBox="0 0 640 220"></svg>
     </div>
     <div class="panel">
+      <h2>Cumulative Economic Returns</h2>
+      <svg id="economicChart" viewBox="0 0 640 220"></svg>
+    </div>
+    <div class="panel">
       <h2>Cash Over Time</h2>
       <svg id="cashChart" viewBox="0 0 640 220"></svg>
     </div>
@@ -242,6 +246,9 @@ def _trajectory_html_document(title, payload_json):
       const returnSeries = Array.from({{ length: agents }}, (_, agentIdx) =>
         [0].concat(steps.map(step => step.cumulative_returns[agentIdx]))
       );
+      const economicSeries = Array.from({{ length: agents }}, (_, agentIdx) =>
+        [0].concat(steps.map(step => step.cumulative_economic_returns?.[agentIdx] ?? 0))
+      );
       const cashSeries = Array.from({{ length: agents }}, (_, agentIdx) =>
         [trajectory.initial_state.agents[agentIdx].cash].concat(
           steps.map(step => step.state_after.agents[agentIdx].cash)
@@ -249,6 +256,7 @@ def _trajectory_html_document(title, payload_json):
       );
       const colors = ["#0f766e", "#c2410c", "#2563eb", "#9333ea", "#65a30d", "#db2777"];
       document.getElementById("returnsChart").innerHTML = polyline(returnSeries, colors);
+      document.getElementById("economicChart").innerHTML = polyline(economicSeries, colors);
       document.getElementById("cashChart").innerHTML = polyline(cashSeries, colors);
     }}
 
@@ -263,7 +271,7 @@ def _trajectory_html_document(title, payload_json):
       const rows = step.state_after.agents.map((agent, idx) => {{
         const action = step.actions[idx];
         const job = agent.positions.filter(pos => !pos.settled).map(pos =>
-          `${{pos.side}} phi=${{pos.target}} d=${{pos.deadline}} l=${{pos.loss.toFixed(2)}}`
+          `${{pos.side}} q=${{pos.quantity}} phi=${{pos.target}} d=${{pos.deadline}} l=${{pos.loss.toFixed(2)}}`
         );
         const resolved = agent.library.resolved.map(item => item.formula);
         return `
@@ -271,6 +279,8 @@ def _trajectory_html_document(title, payload_json):
             <td>${{idx}}</td>
             <td>${{action.type}}</td>
             <td>${{step.rewards[idx].toFixed(3)}}</td>
+            <td>${{(step.economic_rewards?.[idx] ?? 0).toFixed(3)}}</td>
+            <td>${{(step.shaping_rewards?.[idx] ?? 0).toFixed(3)}}</td>
             <td>${{step.cumulative_returns[idx].toFixed(3)}}</td>
             <td>${{agent.cash.toFixed(3)}}</td>
             <td>${{agent.worst_case_balance.toFixed(3)}}</td>
@@ -285,6 +295,8 @@ def _trajectory_html_document(title, payload_json):
               <th>Agent</th>
               <th>Action</th>
               <th>Reward</th>
+              <th>Econ</th>
+              <th>Shape</th>
               <th>Cum Return</th>
               <th>Cash</th>
               <th>Worst Case</th>
@@ -310,6 +322,7 @@ def _trajectory_html_document(title, payload_json):
           <td>${{offer.deadline}}</td>
           <td>${{offer.loss.toFixed(2)}}</td>
           <td>${{offer.price.toFixed(2)}}</td>
+          <td>${{offer.quantity}}</td>
         </tr>`).join("");
       return `
         <table>
@@ -322,6 +335,7 @@ def _trajectory_html_document(title, payload_json):
               <th>Deadline</th>
               <th>Loss</th>
               <th>Price</th>
+              <th>Qty</th>
             </tr>
           </thead>
           <tbody>${{rows}}</tbody>
@@ -338,6 +352,8 @@ def _trajectory_html_document(title, payload_json):
       document.getElementById("envState").innerHTML = `
         <div class="pill">t=${{step.state_after.timestep}}</div>
         <div class="pill">done=${{step.done}}</div>
+        <div class="pill">tracked cash total=${{(step.state_after.market_summary?.tracked_agent_cash_total ?? 0).toFixed(3)}}</div>
+        <div class="pill">system cash total=${{(step.state_after.market_summary?.system_cash_total ?? 0).toFixed(3)}}</div>
         <h3>Public Resolved</h3>
         <div>${{htmlList(step.state_after.public_library.resolved.map(item => item.formula))}}</div>
         <h3>Query Model Quality</h3>

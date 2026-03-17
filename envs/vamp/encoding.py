@@ -11,8 +11,8 @@ Action space layout (discrete indices):
     [next .. +MAX_OFFERS]                AcceptOffer(slot)
     [next .. +MAX_OWN_OFFERS]            CancelOffer(slot)
 
-Local obs: 15*F + N + 12 dims
-Global obs: (4*F + 5 + F) * N + 4*F + 2*F + 1 dims
+Local obs: 14*F + N + 7 + 6*max_offers dims
+Global obs: (4*F + 5 + F) * N + 4*F + 6*max_offers + 1 dims
 """
 
 from __future__ import annotations
@@ -88,14 +88,14 @@ class VampEncoder:
 
     @property
     def local_obs_dim(self) -> int:
-        # Per formula (15 features): hidden_truth_pad(1), concrete(1), resolved(1), difficulty(1),
+        # Per formula (14 features): hidden_truth_pad(1), concrete(1), resolved(1), difficulty(1),
         #   dep_count(1), in_job(1), job_type(2), job_tau_rem(1), cum_proof(1), cum_conj(1),
         #   query_p(1), query_tau(1), weight_sum(1), pub_resolved(1)
         # Per agent: cash(1), worst_case(1), n_positions(1), job_active(1),
         #   query_response_valid(1), own_offer_count(1)
         # Scalar: timestep(1), agent_id one-hot(N)
-        # + market slots: max_offers * 5 (target, deadline, loss, price, side)
-        return 14 * self.F + 6 + 1 + self.N + self.max_offers * 5
+        # + market slots: max_offers * 6 (target, deadline, loss, price, side, quantity)
+        return 14 * self.F + 6 + 1 + self.N + self.max_offers * 6
 
     @property
     def global_obs_dim(self) -> int:
@@ -103,8 +103,8 @@ class VampEncoder:
         # Per agent scalars: cash(1), worst_case(1), job_active(1), job_formula(1), job_type(1) = 5
         # Per agent: offer_vector(F) = F per agent
         # Global: public_concrete(F), public_resolved(F), truth_map(F), difficulty_map(F) = 4*F
-        # Market: offer_slots(max_offers * 5), timestep(1)
-        return (4 * self.F + 5 + self.F) * self.N + 4 * self.F + self.max_offers * 5 + 1
+        # Market: offer_slots(max_offers * 6), timestep(1)
+        return (4 * self.F + 5 + self.F) * self.N + 4 * self.F + self.max_offers * 6 + 1
 
     def decode_action(self, action_idx: int) -> VampAction:
         """Decode a discrete action index into a VampAction."""
@@ -248,10 +248,10 @@ class VampEncoder:
         obs[offset + agent_id] = 1.0
         offset += self.N
 
-        # Market offer slots (max_offers * 5)
+        # Market offer slots (max_offers * 6)
         offer_ids = market.get_offer_ids_sorted()
         for slot_idx in range(self.max_offers):
-            base = offset + slot_idx * 5
+            base = offset + slot_idx * 6
             if slot_idx < len(offer_ids):
                 offer = market.offers[offer_ids[slot_idx]]
                 obs[base] = offer.contract.target / max(self.F, 1)
@@ -259,7 +259,8 @@ class VampEncoder:
                 obs[base + 2] = offer.contract.loss
                 obs[base + 3] = offer.price
                 obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-        offset += self.max_offers * 5
+                obs[base + 5] = offer.quantity / max(cfg.target_init_max_quantity, 1)
+        offset += self.max_offers * 6
 
         return obs
 
@@ -313,10 +314,10 @@ class VampEncoder:
             obs[offset + 3] = graph.difficulty_map[phi]
             offset += 4
 
-        # Market offer slots (max_offers * 5)
+        # Market offer slots (max_offers * 6)
         offer_ids = market.get_offer_ids_sorted()
         for slot_idx in range(self.max_offers):
-            base = offset + slot_idx * 5
+            base = offset + slot_idx * 6
             if slot_idx < len(offer_ids):
                 offer = market.offers[offer_ids[slot_idx]]
                 obs[base] = offer.contract.target / max(self.F, 1)
@@ -324,7 +325,8 @@ class VampEncoder:
                 obs[base + 2] = offer.contract.loss
                 obs[base + 3] = offer.price
                 obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-        offset += self.max_offers * 5
+                obs[base + 5] = offer.quantity / max(cfg.target_init_max_quantity, 1)
+        offset += self.max_offers * 6
 
         # Timestep
         obs[offset] = env_state['timestep'] / max(cfg.max_timestep, 1)

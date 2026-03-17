@@ -28,6 +28,7 @@ class VampEnv(MultiAgentEnv):
     def __init__(self, cfg: VampConfig, seed: int = 0):
         self.cfg = cfg
         self.n_agents = cfg.n_agents
+        self.bounty_agent_id = cfg.n_agents
         self.episode_limit = cfg.max_timestep
         self.rng = np.random.default_rng(seed)
 
@@ -101,26 +102,103 @@ class VampEnv(MultiAgentEnv):
             "timestep": self.timestep,
         }
 
+    def _seed_initial_public_library(self) -> None:
+        """Populate the public library with initially concrete unresolved formulas."""
+        cfg = self.cfg
+        for base_phi in range(cfg.half_F):
+            if self.rng.random() > cfg.initial_public_concrete_prob:
+                continue
+            true_phi = base_phi if self.graph.is_true(base_phi) else self.graph.neg(base_phi)
+            self.public_library.add_concrete(true_phi)
+
+    def _seed_initial_target_offers(self) -> None:
+        """Seed static bounty offers on a subset of public concrete theorems."""
+        cfg = self.cfg
+        if cfg.target_init_prob <= 0.0 or cfg.target_init_max_quantity <= 0:
+            return
+
+        price_levels = [
+            price for price in cfg.price_levels
+            if cfg.target_init_min_price <= price <= cfg.target_init_max_price
+        ]
+        if not price_levels:
+            clipped_target = min(
+                max(cfg.target_init_min_price, min(cfg.price_levels)),
+                max(cfg.price_levels),
+            )
+            nearest_price = min(cfg.price_levels, key=lambda price: abs(price - clipped_target))
+            price_levels = [nearest_price]
+
+        candidates = [
+            phi
+            for phi in sorted(self.public_library.concrete)
+            if self.graph.is_true(phi) and not self.public_library.is_resolved(phi)
+        ]
+        if not candidates:
+            return
+
+        self.rng.shuffle(candidates)
+        longest_loss = min(cfg.loss_levels) if cfg.loss_levels else 0.25
+        deadline = cfg.max_timestep
+
+        for phi in candidates:
+            if len(self.market.offers) >= cfg.max_offers:
+                break
+            if self.rng.random() > cfg.target_init_prob:
+                continue
+            quantity = int(self.rng.integers(1, cfg.target_init_max_quantity + 1))
+            price = float(self.rng.choice(price_levels))
+            self.market.create_and_post(
+                self.bounty_agent_id,
+                phi,
+                deadline,
+                float(longest_loss),
+                "short",
+                price,
+                quantity=quantity,
+                ignore_own_offer_limit=True,
+            )
+
     def reset(self):
         """Initialize/reset the environment.
 
         Returns (obs, share_obs, avail_actions) each with shape (n_agents, dim).
         """
         cfg = self.cfg
+        self.libraries = {}
+        self.query_models = {}
+        self.jobs = {}
+        self.cumulative_proof = {}
+        self.cumulative_conj = {}
+        self.query_responses = {}
+
+        # Public library state shared by all real agents.
+        self.public_library = Library(cfg.F_size)
+        self._seed_initial_public_library()
 
         # Libraries
         for i in range(self.n_agents):
             self.libraries[i] = Library(cfg.F_size)
+            if self.public_library.concrete or self.public_library.resolved:
+                self.libraries[i].merge_from(
+                    self.public_library,
+                    set(self.public_library.concrete),
+                    self.public_library.resolved_formulas(),
+                )
             if cfg.initial_concrete:
                 for phi in cfg.initial_concrete:
                     self.libraries[i].add_concrete(phi)
             if cfg.initial_resolved:
                 for phi, (deps, t, s) in cfg.initial_resolved.items():
                     self.libraries[i].add_resolved(phi, deps, t, s)
-        self.public_library = Library(cfg.F_size)
 
         # Market
-        self.market.reset(self.n_agents, cfg.initial_cash)
+        self.market.reset(
+            self.n_agents + 1,
+            cfg.initial_cash,
+            initial_cash_overrides={self.bounty_agent_id: cfg.target_init_cash},
+        )
+        self._seed_initial_target_offers()
 
         # Query models
         for i in range(self.n_agents):
@@ -183,6 +261,7 @@ class VampEnv(MultiAgentEnv):
             "deadline": int(pos.contract.deadline),
             "loss": float(pos.contract.loss),
             "side": pos.side,
+            "quantity": int(pos.quantity),
             "settled": bool(pos.settled),
             "pnl": float(pos.pnl),
         }
@@ -195,6 +274,7 @@ class VampEnv(MultiAgentEnv):
             "loss": float(offer.contract.loss),
             "side": offer.side,
             "price": float(offer.price),
+            "quantity": int(offer.quantity),
             "poster": int(offer.poster),
         }
 
@@ -299,6 +379,13 @@ class VampEnv(MultiAgentEnv):
                 for i in range(self.n_agents)
             ],
             "public_library": self._serialize_library(self.public_library),
+            "market_summary": {
+                "tracked_agent_cash_total": float(
+                    sum(self.market.get_cash(i) for i in range(self.n_agents))
+                ),
+                "system_cash_total": float(sum(self.market.cash.values())),
+                "bounty_agent_cash": float(self.market.get_cash(self.bounty_agent_id)),
+            },
             "offers": [
                 self._serialize_offer(offer_id, self.market.offers[offer_id])
                 for offer_id in self.market.get_offer_ids_sorted()

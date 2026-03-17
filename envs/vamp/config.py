@@ -24,6 +24,7 @@ class VampConfig:
     # ── 1c. Initial world state (b_0 specification) ──
     initial_concrete: Optional[Set[int]] = None      # initial C_0 for all libraries (default: empty)
     initial_resolved: Optional[Dict[int, Tuple[Set[int], int, int]]] = None  # initial RS_0 (default: empty)
+    initial_public_concrete_prob: float = 0.25       # probability of seeding a formula pair as public concrete at t=0
     initial_cash: float = 10.0                       # per-agent starting cash
     gamma: float = 0.99                              # discount factor
     max_timestep: int = 100                          # episode length / finite horizon
@@ -66,6 +67,11 @@ class VampConfig:
     # remains unchanged unless explicitly enabled.
     operation_gas_fee: float = 0.0
     publish_resolution_bonus: float = 0.0
+    target_init_prob: float = 0.5
+    target_init_min_price: float = 0.1
+    target_init_max_price: float = 0.3
+    target_init_max_quantity: int = 4
+    target_init_cash: float = 100.0
 
     # ── 1h. Implementation-side action simplification ──
     h_max: int = 0                      # query antecedent-width bound
@@ -93,10 +99,24 @@ class VampConfig:
         assert self.lambda_diff > 0, f"lambda_diff must be > 0, got {self.lambda_diff}"
         assert self.alpha_util >= 1.0, f"alpha_util must be >= 1, got {self.alpha_util}"
         assert self.beta_conj >= 1.0, f"beta_conj must be >= 1, got {self.beta_conj}"
+        assert 0.0 <= self.initial_public_concrete_prob <= 1.0, \
+            f"initial_public_concrete_prob must be in [0,1], got {self.initial_public_concrete_prob}"
         assert self.operation_gas_fee >= 0.0, \
             f"operation_gas_fee must be >= 0, got {self.operation_gas_fee}"
         assert self.publish_resolution_bonus >= 0.0, \
             f"publish_resolution_bonus must be >= 0, got {self.publish_resolution_bonus}"
+        assert 0.0 <= self.target_init_prob <= 1.0, \
+            f"target_init_prob must be in [0,1], got {self.target_init_prob}"
+        assert 0.0 <= self.target_init_min_price <= 1.0, \
+            f"target_init_min_price must be in [0,1], got {self.target_init_min_price}"
+        assert 0.0 <= self.target_init_max_price <= 1.0, \
+            f"target_init_max_price must be in [0,1], got {self.target_init_max_price}"
+        assert self.target_init_min_price <= self.target_init_max_price, \
+            "target_init_min_price must be <= target_init_max_price"
+        assert self.target_init_max_quantity >= 0, \
+            f"target_init_max_quantity must be >= 0, got {self.target_init_max_quantity}"
+        assert self.target_init_cash >= 0.0, \
+            f"target_init_cash must be >= 0, got {self.target_init_cash}"
         assert self.phi_transform in ('identity', 'log1p'), \
             f"phi_transform must be 'identity' or 'log1p', got {self.phi_transform}"
 

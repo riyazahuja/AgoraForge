@@ -36,6 +36,7 @@ class Position:
     """A held position in a contract."""
     contract: ContractType
     side: str           # 'long' or 'short'
+    quantity: int = 1
     settled: bool = False
     pnl: float = 0.0   # realized P&L after settlement
 
@@ -47,6 +48,7 @@ class Offer:
     contract: ContractType
     side: str           # 'long' or 'short' — what the ACCEPTOR receives
     price: float        # price the acceptor pays
+    quantity: int       # number of identical units still available
     poster: int         # agent_id of poster
 
 
@@ -68,23 +70,31 @@ class BilateralContractMarket:
         self.cash[agent_id] = initial_cash
         self.positions[agent_id] = []
 
-    def reset(self, n_agents: int, initial_cash: float) -> None:
+    def reset(
+        self,
+        n_agents: int,
+        initial_cash: float,
+        initial_cash_overrides: Optional[Dict[int, float]] = None,
+    ) -> None:
         """Reset market state."""
+        if initial_cash_overrides is None:
+            initial_cash_overrides = {}
         self.cash.clear()
         self.positions.clear()
         self.offers.clear()
         self._next_offer_id = 0
         for i in range(n_agents):
-            self.init_agent(i, initial_cash)
+            self.init_agent(i, float(initial_cash_overrides.get(i, initial_cash)))
 
     def _max_liability(self, position: Position) -> float:
         """Maximum possible loss from a position."""
         if position.settled:
             return 0.0
         if position.side == 'long':
-            return position.contract.loss  # worst case: not resolved
+            unit_liability = position.contract.loss  # worst case: not resolved
         else:
-            return 1.0 - position.contract.loss  # worst case: resolved
+            unit_liability = 1.0 - position.contract.loss  # worst case: resolved
+        return unit_liability * position.quantity
 
     def worst_case_balance(self, agent_id: int) -> float:
         """Worst-case balance = cash - sum of max liabilities."""
@@ -104,11 +114,28 @@ class BilateralContractMarket:
         for i, pos in enumerate(self.positions[agent_id]):
             if (not pos.settled
                 and pos.side == side
+                and pos.quantity > 0
                 and pos.contract.target == contract.target
                 and pos.contract.deadline == contract.deadline
                 and abs(pos.contract.loss - contract.loss) < 1e-9):
                 return i
         return None
+
+    def _remove_position_quantity(self, agent_id: int, pos_idx: int, quantity: int) -> Position:
+        """Remove quantity from an existing position, returning the detached quantity."""
+        pos = self.positions[agent_id][pos_idx]
+        assert 0 < quantity <= pos.quantity
+        detached = Position(
+            contract=pos.contract,
+            side=pos.side,
+            quantity=quantity,
+            settled=pos.settled,
+            pnl=pos.pnl,
+        )
+        pos.quantity -= quantity
+        if pos.quantity == 0:
+            self.positions[agent_id].pop(pos_idx)
+        return detached
 
     def create_and_post(
         self,
@@ -118,6 +145,8 @@ class BilateralContractMarket:
         loss: float,
         side: str,
         price: float,
+        quantity: int = 1,
+        ignore_own_offer_limit: bool = False,
     ) -> Optional[int]:
         """Create a contract and post one side as an offer.
 
@@ -127,15 +156,18 @@ class BilateralContractMarket:
         The poster keeps the specified side. The counter-side is offered.
         Returns offer_id or None if constraints violated.
         """
+        if quantity <= 0:
+            return None
         if len(self.offers) >= self.max_offers:
             return None
-        if self._agent_offer_count(agent_id) >= self.max_own_offers:
+        if (not ignore_own_offer_limit
+                and self._agent_offer_count(agent_id) >= self.max_own_offers):
             return None
 
         contract = ContractType(target=target, deadline=deadline, loss=loss)
-        poster_pos = Position(contract=contract, side=side)
+        poster_pos = Position(contract=contract, side=side, quantity=quantity)
         counter_side = 'short' if side == 'long' else 'long'
-        counter_pos = Position(contract=contract, side=counter_side)
+        counter_pos = Position(contract=contract, side=counter_side, quantity=quantity)
 
         # Both sides cost l + (1-l) = 1.0 in worst-case liability
         test_liability = self._max_liability(poster_pos) + self._max_liability(counter_pos)
@@ -154,11 +186,12 @@ class BilateralContractMarket:
             contract=contract,
             side=counter_side,
             price=price,
+            quantity=quantity,
             poster=agent_id,
         )
         return offer_id
 
-    def accept_offer(self, agent_id: int, offer_id: int) -> bool:
+    def accept_offer(self, agent_id: int, offer_id: int, quantity: int = 1) -> bool:
         """Accept an existing offer.
 
         Transfers the offered position from the poster's portfolio to the
@@ -168,6 +201,8 @@ class BilateralContractMarket:
         if offer_id not in self.offers:
             return False
         offer = self.offers[offer_id]
+        if quantity <= 0 or quantity > offer.quantity:
+            return False
         if offer.poster == agent_id:
             return False  # can't accept own offer
 
@@ -179,19 +214,22 @@ class BilateralContractMarket:
         pos = self.positions[offer.poster][pos_idx]
 
         # Check collateral for acceptor
-        test_liability = self._max_liability(pos) + offer.price
+        unit_liability = self._max_liability(Position(pos.contract, pos.side, quantity=1))
+        test_liability = unit_liability * quantity + offer.price * quantity
         if self.worst_case_balance(agent_id) < test_liability:
             return False
 
         # Transfer position from poster to acceptor
-        self.positions[offer.poster].pop(pos_idx)
-        self.positions[agent_id].append(pos)
+        transferred = self._remove_position_quantity(offer.poster, pos_idx, quantity)
+        self.positions[agent_id].append(transferred)
 
         # Cash transfer
-        self.cash[agent_id] -= offer.price
-        self.cash[offer.poster] += offer.price
+        self.cash[agent_id] -= offer.price * quantity
+        self.cash[offer.poster] += offer.price * quantity
 
-        del self.offers[offer_id]
+        offer.quantity -= quantity
+        if offer.quantity == 0:
+            del self.offers[offer_id]
         return True
 
     def cancel_offer(self, agent_id: int, offer_id: int) -> bool:
@@ -211,12 +249,12 @@ class BilateralContractMarket:
         # Remove the offered-side position (counter-side)
         idx = self._find_position(agent_id, offer.contract, offer.side)
         if idx is not None:
-            self.positions[agent_id].pop(idx)
+            self._remove_position_quantity(agent_id, idx, offer.quantity)
 
         # Remove the poster-side position
         idx = self._find_position(agent_id, offer.contract, poster_side)
         if idx is not None:
-            self.positions[agent_id].pop(idx)
+            self._remove_position_quantity(agent_id, idx, offer.quantity)
 
         del self.offers[offer_id]
         return True
@@ -235,10 +273,11 @@ class BilateralContractMarket:
 
                 is_resolved = c.target in resolved_set
                 if pos.side == 'long':
-                    pos.pnl = (1.0 - c.loss) if is_resolved else (-c.loss)
+                    unit_pnl = (1.0 - c.loss) if is_resolved else (-c.loss)
                 else:
-                    pos.pnl = (-(1.0 - c.loss)) if is_resolved else c.loss
+                    unit_pnl = (-(1.0 - c.loss)) if is_resolved else c.loss
 
+                pos.pnl = unit_pnl * pos.quantity
                 self.cash[agent_id] += pos.pnl
                 pos.settled = True
 

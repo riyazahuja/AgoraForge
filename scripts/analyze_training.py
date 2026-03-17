@@ -57,8 +57,12 @@ def load_all_seeds(results_dir: str):
     tags_of_interest = {
         "online/eval_return",
         "online/eval_economic_return",
+        "online/eval_total_return",
+        "online/eval_total_economic_return",
         "online/random_baseline_return",
         "online/random_baseline_economic_return",
+        "online/random_baseline_total_return",
+        "online/random_baseline_total_economic_return",
         "online/eval_minus_random",
         "online/actor_loss",
         "online/critic_loss",
@@ -66,6 +70,8 @@ def load_all_seeds(results_dir: str):
         "online/confidence",
         "online/train_return",
         "online/train_economic_return",
+        "online/train_total_return",
+        "online/train_total_economic_return",
     }
 
     for sd in seed_dirs:
@@ -261,6 +267,45 @@ def plot_query_model_quality(all_data, plots_dir):
     print(f"Saved {plots_dir}/query_model_quality.png")
 
 
+def plot_mean_returns(all_data, plots_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharex=False)
+    plot_specs = [
+        ("online/train_return", "online/eval_return", "online/random_baseline_return", "Mean Shaped Return"),
+        ("online/train_economic_return", "online/eval_economic_return", "online/random_baseline_economic_return", "Mean Economic Return"),
+        ("online/train_total_return", "online/eval_total_return", "online/random_baseline_total_return", "Total Shaped Return"),
+        (
+            "online/train_total_economic_return",
+            "online/eval_total_economic_return",
+            "online/random_baseline_total_economic_return",
+            "Total Economic Return",
+        ),
+    ]
+
+    for ax, (train_tag, eval_tag, random_tag, title) in zip(axes.flatten(), plot_specs):
+        for tag, label, color in [
+            (train_tag, "Train", "tab:blue"),
+            (eval_tag, "Eval", "tab:orange"),
+            (random_tag, "Random", "tab:red"),
+        ]:
+            if tag not in all_data:
+                continue
+            steps, mean, std = align_and_aggregate(all_data[tag])
+            if steps is None:
+                continue
+            plot_with_bands(ax, steps, mean, std, label, color)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Return")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        if ax.lines:
+            ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, "mean_returns.png"), dpi=150)
+    plt.close(fig)
+    print(f"Saved {plots_dir}/mean_returns.png")
+
+
 def write_trajectory_index(results_dir, trajectory_artifacts):
     if not trajectory_artifacts:
         return
@@ -368,6 +413,7 @@ def main():
     plot_agent_returns(all_data, plots_dir)
     plot_agent_economic_returns(all_data, plots_dir)
     plot_query_model_quality(all_data, plots_dir)
+    plot_mean_returns(all_data, plots_dir)
     write_trajectory_index(args.results_dir, trajectory_artifacts)
 
     summary_lines = []
@@ -414,6 +460,22 @@ def main():
                 if mean is not None:
                     agent_idx = int(tag.rsplit("agent", 1)[1])
                     summary_lines.append(f"  Agent {agent_idx}: {mean[-1]:.4f}")
+
+    for tag, label in [
+        ("online/train_return", "Train Mean Shaped Return"),
+        ("online/eval_return", "Eval Mean Shaped Return"),
+        ("online/train_economic_return", "Train Mean Economic Return"),
+        ("online/eval_economic_return", "Eval Mean Economic Return"),
+        ("online/train_total_return", "Train Total Shaped Return"),
+        ("online/eval_total_return", "Eval Total Shaped Return"),
+        ("online/train_total_economic_return", "Train Total Economic Return"),
+        ("online/eval_total_economic_return", "Eval Total Economic Return"),
+    ]:
+        if tag in all_data:
+            _, mean, _ = align_and_aggregate(all_data[tag])
+            if mean is not None:
+                summary_lines.append(f"\n{label}:")
+                summary_lines.append(f"  Final: {mean[-1]:.4f}")
 
     for tag_prefix, label in [
         ("online/train_economic_return_agent", "Train"),
