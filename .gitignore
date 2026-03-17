@@ -1,3 +1,5 @@
 .claude
 .vscode
 writeup.tex
+results
+**/__pycache__

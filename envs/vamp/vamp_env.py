@@ -152,6 +152,95 @@ class VampEnv(MultiAgentEnv):
 
         return obs, share_obs, avail_actions
 
+    def _serialize_library(self, lib: Library) -> dict:
+        return {
+            'concrete': sorted(int(phi) for phi in lib.concrete),
+            'resolved': [
+                {
+                    'formula': int(phi),
+                    'deps': sorted(int(dep) for dep in info.deps),
+                    'solve_time': int(info.solve_time),
+                    'solver': int(info.solver),
+                }
+                for phi, info in sorted(lib.resolved.items())
+            ],
+        }
+
+    def _serialize_position(self, pos) -> dict:
+        return {
+            'target': int(pos.contract.target),
+            'deadline': int(pos.contract.deadline),
+            'loss': float(pos.contract.loss),
+            'side': pos.side,
+            'settled': bool(pos.settled),
+            'pnl': float(pos.pnl),
+        }
+
+    def _serialize_offer(self, offer_id: int, offer) -> dict:
+        return {
+            'offer_id': int(offer_id),
+            'target': int(offer.contract.target),
+            'deadline': int(offer.contract.deadline),
+            'loss': float(offer.contract.loss),
+            'side': offer.side,
+            'price': float(offer.price),
+            'poster': int(offer.poster),
+        }
+
+    def snapshot(self) -> dict:
+        return {
+            'timestep': int(self.timestep),
+            'jobs': [
+                None if self.jobs[i] is None else {
+                    'type': self.jobs[i]['type'],
+                    'target': int(self.jobs[i]['target']),
+                    'tau_rem': int(self.jobs[i]['tau_rem']),
+                    'tau_eff': int(self.jobs[i]['tau_eff']),
+                }
+                for i in range(self.n_agents)
+            ],
+            'query_responses': [
+                None if self.query_responses[i] is None else {
+                    'formula': int(self.query_responses[i][0]),
+                    'p_hat': float(self.query_responses[i][1]),
+                    'tau_hat': float(self.query_responses[i][2]),
+                }
+                for i in range(self.n_agents)
+            ],
+            'agents': [
+                {
+                    'agent_id': int(i),
+                    'cash': float(self.market.get_cash(i)),
+                    'worst_case_balance': float(self.market.worst_case_balance(i)),
+                    'positions': [self._serialize_position(pos) for pos in self.market.positions[i]],
+                    'library': self._serialize_library(self.libraries[i]),
+                    'cumulative_proof': [float(v) for v in self.cumulative_proof[i].tolist()],
+                    'cumulative_conj': [float(v) for v in self.cumulative_conj[i].tolist()],
+                }
+                for i in range(self.n_agents)
+            ],
+            'public_library': self._serialize_library(self.public_library),
+            'offers': [
+                self._serialize_offer(offer_id, self.market.offers[offer_id])
+                for offer_id in self.market.get_offer_ids_sorted()
+            ],
+        }
+
+    def describe_action(self, action_idx: int) -> dict:
+        action = self.encoder.decode_action(int(action_idx))
+        return {
+            'type': action.type,
+            'formula': None if action.formula is None else int(action.formula),
+            'budget': None if action.budget is None else int(action.budget),
+            'deadline': None if action.deadline is None else int(action.deadline),
+            'loss': None if action.loss is None else int(action.loss),
+            'side': action.side,
+            'offer_slot': None if action.offer_slot is None else int(action.offer_slot),
+        }
+
+    def describe_actions(self, actions) -> List[dict]:
+        return [self.describe_action(action_idx) for action_idx in actions]
+
     def step(self, actions):
         """Execute one environment step.
 

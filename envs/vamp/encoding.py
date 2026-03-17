@@ -88,7 +88,7 @@ class VampEncoder:
 
     @property
     def local_obs_dim(self) -> int:
-        # Per formula (15 features): truth(1), concrete(1), resolved(1), difficulty(1),
+        # Per formula (15 features): hidden_truth_pad(1), concrete(1), resolved(1), difficulty(1),
         #   dep_count(1), in_job(1), job_type(2), job_tau_rem(1), cum_proof(1), cum_conj(1),
         #   query_p(1), query_tau(1), weight_sum(1), pub_resolved(1)
         # Per agent: cash(1), worst_case(1), n_positions(1), job_active(1),
@@ -202,7 +202,8 @@ class VampEncoder:
 
         # Per-formula features (14 * F)
         for phi in range(self.F):
-            obs[offset] = graph.truth_map[phi]
+            # Do not leak latent truth into the policy observation.
+            obs[offset] = 0.0
             obs[offset + 1] = float(lib.is_concrete(phi))
             obs[offset + 2] = float(lib.is_resolved(phi))
             obs[offset + 3] = graph.difficulty_map[phi]
@@ -298,7 +299,9 @@ class VampEncoder:
         for phi in range(self.F):
             obs[offset] = float(pub_lib.is_concrete(phi))
             obs[offset + 1] = float(pub_lib.is_resolved(phi))
-            obs[offset + 2] = graph.truth_map[phi]
+            # Keep the global observation aligned in size, but hide latent truth so
+            # the critic cannot solve the game as a static oracle lookup.
+            obs[offset + 2] = 0.0
             obs[offset + 3] = graph.difficulty_map[phi]
             offset += 4
 

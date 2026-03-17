@@ -9,7 +9,16 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def get_model_device(model):
+    return next(unwrap_model(model).parameters()).device
 
 
 def sample(model, critic_model, state, obs, sample=False, actions=None, rtgs=None,
@@ -18,10 +27,7 @@ def sample(model, critic_model, state, obs, sample=False, actions=None, rtgs=Non
     take a conditioning sequence of indices in x (of shape (b,t)) and predict the next token in
     the sequence, feeding the predictions back into the model each time.
     """
-    if torch.cuda.is_available():
-        block_size = model.module.get_block_size()
-    else:
-        block_size = model.get_block_size()
+    block_size = unwrap_model(model).get_block_size()
     model.eval()
     critic_model.eval()
 

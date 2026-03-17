@@ -6,6 +6,14 @@ Contract type chi = (target_formula, deadline_T, loss_l):
 
 Portfolio: (cash, held_positions, posted_offers)
     Worst-case balance: cash - sum max_liability(position) >= 0
+
+Contract lifecycle:
+    1. Create: agent mints BOTH long and short positions in their own portfolio.
+       The two sides always net to zero P&L, so no money is created.
+    2. Post: one side is placed on the public offer book.
+    3. Accept: the offered position transfers from poster to acceptor; cash paid.
+    4. Cancel: entire contract dissolved (both positions removed).
+    5. Unaccepted expiry: both sides settle in poster's portfolio → net zero.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ class Offer:
     """A posted offer in the market."""
     offer_id: int
     contract: ContractType
-    side: str           # 'long' or 'short' — what the POSTER holds
+    side: str           # 'long' or 'short' — what the ACCEPTOR receives
     price: float        # price the acceptor pays
     poster: int         # agent_id of poster
 
@@ -91,6 +99,17 @@ class BilateralContractMarket:
     def _agent_offer_count(self, agent_id: int) -> int:
         return sum(1 for o in self.offers.values() if o.poster == agent_id)
 
+    def _find_position(self, agent_id: int, contract: ContractType, side: str) -> Optional[int]:
+        """Find index of a matching unsettled position in agent's portfolio."""
+        for i, pos in enumerate(self.positions[agent_id]):
+            if (not pos.settled
+                and pos.side == side
+                and pos.contract.target == contract.target
+                and pos.contract.deadline == contract.deadline
+                and abs(pos.contract.loss - contract.loss) < 1e-9):
+                return i
+        return None
+
     def create_and_post(
         self,
         agent_id: int,
@@ -102,7 +121,10 @@ class BilateralContractMarket:
     ) -> Optional[int]:
         """Create a contract and post one side as an offer.
 
-        The poster takes the specified side. The offer is for the counter-side.
+        Mints BOTH long and short positions in the poster's portfolio (net zero
+        risk), then posts the counter-side on the offer book.
+
+        The poster keeps the specified side. The counter-side is offered.
         Returns offer_id or None if constraints violated.
         """
         if len(self.offers) >= self.max_offers:
@@ -112,17 +134,19 @@ class BilateralContractMarket:
 
         contract = ContractType(target=target, deadline=deadline, loss=loss)
         poster_pos = Position(contract=contract, side=side)
+        counter_side = 'short' if side == 'long' else 'long'
+        counter_pos = Position(contract=contract, side=counter_side)
 
-        # Check collateral: poster must afford the position
-        test_liability = self._max_liability(poster_pos)
+        # Both sides cost l + (1-l) = 1.0 in worst-case liability
+        test_liability = self._max_liability(poster_pos) + self._max_liability(counter_pos)
         if self.worst_case_balance(agent_id) < test_liability:
             return None
 
-        # Add position to poster
+        # Mint both positions in poster's portfolio
         self.positions[agent_id].append(poster_pos)
+        self.positions[agent_id].append(counter_pos)
 
-        # Create offer for counter-side
-        counter_side = 'short' if side == 'long' else 'long'
+        # Post the counter-side as an offer
         offer_id = self._next_offer_id
         self._next_offer_id += 1
         self.offers[offer_id] = Offer(
@@ -135,22 +159,35 @@ class BilateralContractMarket:
         return offer_id
 
     def accept_offer(self, agent_id: int, offer_id: int) -> bool:
-        """Accept an existing offer. Returns True on success."""
+        """Accept an existing offer.
+
+        Transfers the offered position from the poster's portfolio to the
+        acceptor's portfolio. Cash is transferred from acceptor to poster.
+        Returns True on success.
+        """
         if offer_id not in self.offers:
             return False
         offer = self.offers[offer_id]
         if offer.poster == agent_id:
             return False  # can't accept own offer
 
-        acceptor_pos = Position(contract=offer.contract, side=offer.side)
+        # Find the offered position in poster's portfolio
+        pos_idx = self._find_position(offer.poster, offer.contract, offer.side)
+        if pos_idx is None:
+            return False  # position no longer available
+
+        pos = self.positions[offer.poster][pos_idx]
 
         # Check collateral for acceptor
-        test_liability = self._max_liability(acceptor_pos) + offer.price
+        test_liability = self._max_liability(pos) + offer.price
         if self.worst_case_balance(agent_id) < test_liability:
             return False
 
-        # Transfer
-        self.positions[agent_id].append(acceptor_pos)
+        # Transfer position from poster to acceptor
+        self.positions[offer.poster].pop(pos_idx)
+        self.positions[agent_id].append(pos)
+
+        # Cash transfer
         self.cash[agent_id] -= offer.price
         self.cash[offer.poster] += offer.price
 
@@ -158,24 +195,28 @@ class BilateralContractMarket:
         return True
 
     def cancel_offer(self, agent_id: int, offer_id: int) -> bool:
-        """Cancel own offer. Returns True on success."""
+        """Cancel own offer and dissolve the entire contract.
+
+        Removes both the offered position and the poster's kept position,
+        freeing up collateral. Returns True on success.
+        """
         if offer_id not in self.offers:
             return False
         offer = self.offers[offer_id]
         if offer.poster != agent_id:
             return False
 
-        # Remove the poster's position that was created with this offer
-        # Find the matching unsettled position
-        counter_side = 'short' if offer.side == 'long' else 'long'
-        for i, pos in enumerate(self.positions[agent_id]):
-            if (not pos.settled
-                and pos.contract.target == offer.contract.target
-                and pos.contract.deadline == offer.contract.deadline
-                and abs(pos.contract.loss - offer.contract.loss) < 1e-9
-                and pos.side == counter_side):
-                self.positions[agent_id].pop(i)
-                break
+        poster_side = 'short' if offer.side == 'long' else 'long'
+
+        # Remove the offered-side position (counter-side)
+        idx = self._find_position(agent_id, offer.contract, offer.side)
+        if idx is not None:
+            self.positions[agent_id].pop(idx)
+
+        # Remove the poster-side position
+        idx = self._find_position(agent_id, offer.contract, poster_side)
+        if idx is not None:
+            self.positions[agent_id].pop(idx)
 
         del self.offers[offer_id]
         return True
@@ -187,7 +228,9 @@ class BilateralContractMarket:
                 if pos.settled:
                     continue
                 c = pos.contract
-                if timestep < c.deadline:
+                # Contracts should realize as soon as the public event becomes known,
+                # not only at expiry, otherwise proof/publication signals stay delayed.
+                if timestep < c.deadline and c.target not in resolved_set:
                     continue
 
                 is_resolved = c.target in resolved_set

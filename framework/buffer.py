@@ -35,6 +35,39 @@ class StateActionReturnDataset(Dataset):
     def max_rtgs(self):
         return max(self.rtgs)[0]
 
+    def to_dict(self):
+        return {
+            'global_state': copy.deepcopy(self.global_state),
+            'local_obs': copy.deepcopy(self.local_obs),
+            'block_size': int(self.block_size),
+            'actions': copy.deepcopy(self.actions),
+            'done_idxs': copy.deepcopy(self.done_idxs),
+            'rewards': copy.deepcopy(self.rewards),
+            'avas': copy.deepcopy(self.avas),
+            'v_values': copy.deepcopy(self.v_values),
+            'rtgs': copy.deepcopy(self.rtgs),
+            'rets': copy.deepcopy(self.rets),
+            'advs': copy.deepcopy(self.advs),
+            'timesteps': copy.deepcopy(self.timesteps),
+        }
+
+    @classmethod
+    def from_dict(cls, payload):
+        return cls(
+            global_state=payload['global_state'],
+            local_obs=payload['local_obs'],
+            block_size=payload['block_size'],
+            actions=payload['actions'],
+            done_idxs=payload['done_idxs'],
+            rewards=payload['rewards'],
+            avas=payload['avas'],
+            v_values=payload['v_values'],
+            rtgs=payload['rtgs'],
+            rets=payload['rets'],
+            advs=payload['advs'],
+            timesteps=payload['timesteps'],
+        )
+
     def __getitem__(self, idx):
         context_length = self.block_size // 3
         done_idx = idx + context_length

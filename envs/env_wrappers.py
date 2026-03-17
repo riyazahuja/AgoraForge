@@ -2,7 +2,7 @@
 Modified from OpenAI Baselines code to work with multi-agent envs
 """
 import numpy as np
-from multiprocessing import Process, Pipe
+import multiprocessing as mp
 from abc import ABC, abstractmethod
 
 
@@ -149,6 +149,10 @@ def shareworker(remote, parent_remote, env_fn_wrapper):
         elif cmd == 'render_vulnerability':
             fr = env.render_vulnerability(data)
             remote.send((fr))
+        elif cmd == 'snapshot':
+            remote.send(env.snapshot())
+        elif cmd == 'describe_actions':
+            remote.send(env.describe_actions(data))
         else:
             raise NotImplementedError
 
@@ -161,8 +165,9 @@ class ShareSubprocVecEnv(ShareVecEnv):
         self.waiting = False
         self.closed = False
         nenvs = len(env_fns)
-        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(nenvs)])
-        self.ps = [Process(target=shareworker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
+        ctx = mp.get_context("spawn")
+        self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(nenvs)])
+        self.ps = [ctx.Process(target=shareworker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
                    for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)]
         for p in self.ps:
             p.daemon = True
@@ -196,6 +201,16 @@ class ShareSubprocVecEnv(ShareVecEnv):
         for remote in self.remotes:
             remote.send(('reset_task', None))
         return np.stack([remote.recv() for remote in self.remotes])
+
+    def get_env_snapshots(self):
+        for remote in self.remotes:
+            remote.send(('snapshot', None))
+        return [remote.recv() for remote in self.remotes]
+
+    def describe_actions(self, actions):
+        for remote, action in zip(self.remotes, actions):
+            remote.send(('describe_actions', action))
+        return [remote.recv() for remote in self.remotes]
 
     def close(self):
         if self.closed:
