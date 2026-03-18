@@ -33,6 +33,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError:
@@ -46,7 +47,9 @@ except ImportError:
 
 AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_return_agent(\d+)$")
 ECON_AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_economic_return_agent(\d+)$")
-QUERY_TAG_PATTERN = re.compile(r"online/query_model_(mae|rmse|feasible_mae|feasible_rmse)_agent(\d+)$")
+QUERY_TAG_PATTERN = re.compile(
+    r"online/query_model_(mae|rmse|feasible_mae|feasible_rmse)_agent(\d+)$"
+)
 TRAJECTORY_JSON_PATTERN = re.compile(r"eval_epoch_(\d+)_thread_(\d+)\.json$")
 
 
@@ -59,10 +62,13 @@ def load_scalar(ea: EventAccumulator, tag: str):
 
 def load_all_seeds(results_dir: str):
     logs_dir = os.path.join(results_dir, "logs")
-    seed_dirs = sorted([
-        d for d in os.listdir(logs_dir)
-        if os.path.isdir(os.path.join(logs_dir, d)) and d.startswith("seed_")
-    ])
+    seed_dirs = sorted(
+        [
+            d
+            for d in os.listdir(logs_dir)
+            if os.path.isdir(os.path.join(logs_dir, d)) and d.startswith("seed_")
+        ]
+    )
 
     if not seed_dirs:
         sys.exit(f"No seed directories found in {logs_dir}")
@@ -96,21 +102,26 @@ def load_all_seeds(results_dir: str):
             ea.Reload()
             available = set(ea.Tags().get("scalars", []))
             dynamic_agent_tags = {
-                tag for tag in available
+                tag
+                for tag in available
                 if AGENT_TAG_PATTERN.match(tag) or ECON_AGENT_TAG_PATTERN.match(tag)
             }
-            dynamic_query_tags = {tag for tag in available if QUERY_TAG_PATTERN.match(tag)}
+            dynamic_query_tags = {
+                tag for tag in available if QUERY_TAG_PATTERN.match(tag)
+            }
             for tag in tags_of_interest | dynamic_agent_tags | dynamic_query_tags:
                 if tag in available:
                     steps, values = load_scalar(ea, tag)
                     all_data[tag].append((steps, values))
 
         for trajectory_path in load_latest_eval_trajectory_paths(path):
-            trajectory_records.append({
-                'seed_dir': sd,
-                'json_path': trajectory_path,
-                'label': os.path.basename(trajectory_path),
-            })
+            trajectory_records.append(
+                {
+                    "seed_dir": sd,
+                    "json_path": trajectory_path,
+                    "label": os.path.basename(trajectory_path),
+                }
+            )
 
     return all_data, seed_dirs, trajectory_records
 
@@ -126,7 +137,7 @@ def align_and_aggregate(series_list):
 
     aligned = []
     for _, values in series_list:
-        aligned.append(values[:len(ref_steps)])
+        aligned.append(values[: len(ref_steps)])
 
     aligned = np.array(aligned)
     return ref_steps, np.mean(aligned, axis=0), np.std(aligned, axis=0)
@@ -140,13 +151,23 @@ def plot_with_bands(ax, steps, mean, std, label, color):
 def plot_agent_returns(all_data, plots_dir):
     agent_tags = sorted(
         [tag for tag in all_data if AGENT_TAG_PATTERN.match(tag)],
-        key=lambda tag: (AGENT_TAG_PATTERN.match(tag).group(1), int(AGENT_TAG_PATTERN.match(tag).group(2))),
+        key=lambda tag: (
+            AGENT_TAG_PATTERN.match(tag).group(1),
+            int(AGENT_TAG_PATTERN.match(tag).group(2)),
+        ),
     )
     if not agent_tags:
         return
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:green",
+        "tab:red",
+        "tab:purple",
+        "tab:brown",
+    ]
 
     for mode_idx, mode in enumerate(["train", "eval"]):
         ax = axes[mode_idx]
@@ -193,7 +214,14 @@ def plot_agent_economic_returns(all_data, plots_dir):
         return
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:green",
+        "tab:red",
+        "tab:purple",
+        "tab:brown",
+    ]
 
     for mode_idx, mode in enumerate(["train", "eval"]):
         ax = axes[mode_idx]
@@ -246,7 +274,14 @@ def plot_query_model_quality(all_data, plots_dir):
         ("feasible_rmse", "Feasible-Only RMSE"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharex=False)
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:green",
+        "tab:red",
+        "tab:purple",
+        "tab:brown",
+    ]
 
     for ax, (metric_name, title) in zip(axes.flatten(), metrics):
         found = False
@@ -283,9 +318,24 @@ def plot_query_model_quality(all_data, plots_dir):
 def plot_mean_returns(all_data, plots_dir):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharex=False)
     plot_specs = [
-        ("online/train_return", "online/eval_return", "online/random_baseline_return", "Mean Shaped Return"),
-        ("online/train_economic_return", "online/eval_economic_return", "online/random_baseline_economic_return", "Mean Economic Return"),
-        ("online/train_total_return", "online/eval_total_return", "online/random_baseline_total_return", "Total Shaped Return"),
+        (
+            "online/train_return",
+            "online/eval_return",
+            "online/random_baseline_return",
+            "Mean Shaped Return",
+        ),
+        (
+            "online/train_economic_return",
+            "online/eval_economic_return",
+            "online/random_baseline_economic_return",
+            "Mean Economic Return",
+        ),
+        (
+            "online/train_total_return",
+            "online/eval_total_return",
+            "online/random_baseline_total_return",
+            "Total Shaped Return",
+        ),
         (
             "online/train_total_economic_return",
             "online/eval_total_economic_return",
@@ -345,8 +395,8 @@ def aggregate_mean_std_series(mean_series_list, std_series_list):
         aligned_stds = np.zeros_like(aligned_means)
     steps = np.arange(min_len, dtype=np.int32)
     mean = np.mean(aligned_means, axis=0)
-    second_moment = np.mean(aligned_stds ** 2 + aligned_means ** 2, axis=0)
-    std = np.sqrt(np.maximum(second_moment - mean ** 2, 0.0))
+    second_moment = np.mean(aligned_stds**2 + aligned_means**2, axis=0)
+    std = np.sqrt(np.maximum(second_moment - mean**2, 0.0))
     return steps, mean, std
 
 
@@ -370,10 +420,7 @@ def load_eval_trajectory_paths_by_epoch(seed_log_dir: str) -> dict[int, list[str
         epoch = int(match.group(1))
         by_epoch[epoch].append(os.path.join(traj_dir, name))
 
-    return {
-        epoch: sorted(paths)
-        for epoch, paths in by_epoch.items()
-    }
+    return {epoch: sorted(paths) for epoch, paths in by_epoch.items()}
 
 
 def extract_public_resolved_counts(trajectory: dict) -> np.ndarray:
@@ -427,10 +474,14 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
             for trajectory_path in trajectory_paths:
                 with open(trajectory_path, "r", encoding="utf-8") as handle:
                     trajectory = json.load(handle)
-                realized_series_by_epoch[epoch].append(extract_public_resolved_counts(trajectory))
+                realized_series_by_epoch[epoch].append(
+                    extract_public_resolved_counts(trajectory)
+                )
                 used_trajectories += 1
                 if cfg is not None:
-                    oracle_inputs_by_epoch[epoch].append((cfg, trajectory["initial_state"]))
+                    oracle_inputs_by_epoch[epoch].append(
+                        (cfg, trajectory["initial_state"])
+                    )
 
     if not realized_series_by_epoch:
         return None
@@ -441,7 +492,9 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
     oracle_mean_by_epoch: dict[int, np.ndarray] = {}
 
     for epoch in epochs:
-        real_steps, epoch_real_mean, _ = aggregate_sequence_series(realized_series_by_epoch[epoch])
+        real_steps, epoch_real_mean, _ = aggregate_sequence_series(
+            realized_series_by_epoch[epoch]
+        )
         if real_steps is None:
             continue
         observed_mean_by_epoch[epoch] = epoch_real_mean
@@ -464,7 +517,10 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
     plotted_epochs = sorted(observed_mean_by_epoch)
     max_len = max(
         max(len(series) for series in observed_mean_by_epoch.values()),
-        max((len(series) for series in collapsed_oracle_mean_by_epoch.values()), default=0),
+        max(
+            (len(series) for series in collapsed_oracle_mean_by_epoch.values()),
+            default=0,
+        ),
     )
 
     timestep_grid, epoch_grid = np.meshgrid(
@@ -478,10 +534,10 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
     oracle_mean = None
     for row_idx, epoch in enumerate(plotted_epochs):
         observed_series = observed_mean_by_epoch[epoch]
-        observed_surface[row_idx, :len(observed_series)] = observed_series
+        observed_surface[row_idx, : len(observed_series)] = observed_series
         oracle_series = collapsed_oracle_mean_by_epoch.get(epoch)
         if oracle_series is not None:
-            oracle_surface[row_idx, :len(oracle_series)] = oracle_series
+            oracle_surface[row_idx, : len(oracle_series)] = oracle_series
             if epoch == latest_epoch:
                 oracle_mean = oracle_series
 
@@ -546,12 +602,31 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
     ax.yaxis.pane.set_alpha(0.06)
     ax.zaxis.pane.set_alpha(0.06)
     ax.legend(
-        handles=[
-            Patch(facecolor="#2563eb", edgecolor="#1d4ed8", alpha=0.78, label="Observed surface"),
-            Patch(facecolor="#f59e0b", edgecolor="#d97706", alpha=0.38, label="Oracle surface"),
-        ] if oracle_available else [
-            Patch(facecolor="#2563eb", edgecolor="#1d4ed8", alpha=0.78, label="Observed surface"),
-        ],
+        handles=(
+            [
+                Patch(
+                    facecolor="#2563eb",
+                    edgecolor="#1d4ed8",
+                    alpha=0.78,
+                    label="Observed surface",
+                ),
+                Patch(
+                    facecolor="#f59e0b",
+                    edgecolor="#d97706",
+                    alpha=0.38,
+                    label="Oracle surface",
+                ),
+            ]
+            if oracle_available
+            else [
+                Patch(
+                    facecolor="#2563eb",
+                    edgecolor="#1d4ed8",
+                    alpha=0.78,
+                    label="Observed surface",
+                ),
+            ]
+        ),
         loc="upper left",
     )
     fig.tight_layout()
@@ -579,7 +654,9 @@ def _load_seed_config(seed_log_dir: str) -> Optional[object]:
     return deserialize_config(metadata["config"])
 
 
-def generate_trajectory_views(results_dir: str, trajectory_records: list[dict]) -> list[dict]:
+def generate_trajectory_views(
+    results_dir: str, trajectory_records: list[dict]
+) -> list[dict]:
     generated = []
     logs_dir = os.path.join(results_dir, "logs")
     cfg_cache: dict[str, Optional[object]] = {}
@@ -598,12 +675,13 @@ def generate_trajectory_views(results_dir: str, trajectory_records: list[dict]) 
         if cfg is not None:
             oracle = solve_public_resolution_oracle(cfg, trajectory["initial_state"])
             oracle_series = [
-                float(v)
-                for v in oracle.get("expected_public_resolved_by_time", [])
+                float(v) for v in oracle.get("expected_public_resolved_by_time", [])
             ]
 
         json_stem = Path(json_path).stem
-        html_path = os.path.join(os.path.dirname(json_path), f"{json_stem}_analysis.html")
+        html_path = os.path.join(
+            os.path.dirname(json_path), f"{json_stem}_analysis.html"
+        )
         write_trajectory_viewer_html(
             html_path,
             trajectory,
@@ -612,12 +690,14 @@ def generate_trajectory_views(results_dir: str, trajectory_records: list[dict]) 
             seed_dir=seed_dir,
             label=f"Trajectory Viewer: {json_stem}",
         )
-        generated.append({
-            "seed_dir": seed_dir,
-            "json_path": json_path,
-            "html_path": html_path,
-            "label": os.path.basename(html_path),
-        })
+        generated.append(
+            {
+                "seed_dir": seed_dir,
+                "json_path": json_path,
+                "html_path": html_path,
+                "label": os.path.basename(html_path),
+            }
+        )
         print(f"Saved {html_path}")
 
     return generated
@@ -676,10 +756,17 @@ def main():
             plot_with_bands(ax, steps, mean, std, "Eval Return", "tab:blue")
 
     if "online/random_baseline_return" in all_data:
-        r_steps, r_mean, _ = align_and_aggregate(all_data["online/random_baseline_return"])
+        r_steps, r_mean, _ = align_and_aggregate(
+            all_data["online/random_baseline_return"]
+        )
         if r_steps is not None:
             avg_random = np.mean(r_mean)
-            ax.axhline(avg_random, color="tab:red", linestyle="--", label=f"Random baseline ({avg_random:.3f})")
+            ax.axhline(
+                avg_random,
+                color="tab:red",
+                linestyle="--",
+                label=f"Random baseline ({avg_random:.3f})",
+            )
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Return")
@@ -693,14 +780,23 @@ def main():
     print(f"Saved {plots_dir}/eval_return.png")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    for i, (tag, title) in enumerate([
-        ("online/actor_loss", "Actor Loss"),
-        ("online/critic_loss", "Critic Loss"),
-    ]):
+    for i, (tag, title) in enumerate(
+        [
+            ("online/actor_loss", "Actor Loss"),
+            ("online/critic_loss", "Critic Loss"),
+        ]
+    ):
         if tag in all_data:
             steps, mean, std = align_and_aggregate(all_data[tag])
             if steps is not None:
-                plot_with_bands(axes[i], steps, mean, std, title, "tab:orange" if i == 0 else "tab:green")
+                plot_with_bands(
+                    axes[i],
+                    steps,
+                    mean,
+                    std,
+                    title,
+                    "tab:orange" if i == 0 else "tab:green",
+                )
         axes[i].set_xlabel("Epoch")
         axes[i].set_ylabel("Loss")
         axes[i].set_title(title)
@@ -732,8 +828,12 @@ def main():
     plot_agent_economic_returns(all_data, plots_dir)
     plot_query_model_quality(all_data, plots_dir)
     plot_mean_returns(all_data, plots_dir)
-    public_resolution_summary = plot_public_resolved_vs_oracle(args.results_dir, seed_dirs, plots_dir)
-    trajectory_artifacts = generate_trajectory_views(args.results_dir, trajectory_records)
+    public_resolution_summary = plot_public_resolved_vs_oracle(
+        args.results_dir, seed_dirs, plots_dir
+    )
+    trajectory_artifacts = generate_trajectory_views(
+        args.results_dir, trajectory_records
+    )
     write_trajectory_index(args.results_dir, trajectory_artifacts)
 
     summary_lines = []
@@ -768,7 +868,10 @@ def main():
             elif improvement <= 0.1 and slope <= 0:
                 verdict = "NOT LEARNING"
 
-    for tag_prefix, label in [("online/train_return_agent", "Train"), ("online/eval_return_agent", "Eval")]:
+    for tag_prefix, label in [
+        ("online/train_return_agent", "Train"),
+        ("online/eval_return_agent", "Eval"),
+    ]:
         matched_tags = sorted(
             [tag for tag in all_data if tag.startswith(tag_prefix)],
             key=lambda tag: int(tag.rsplit("agent", 1)[1]),
@@ -841,8 +944,10 @@ def main():
     if "online/eval_minus_random" in all_data:
         _, gap_mean, _ = align_and_aggregate(all_data["online/eval_minus_random"])
         if gap_mean is not None:
-            final_gap = np.mean(gap_mean[-max(1, len(gap_mean)//4):])
-            summary_lines.append(f"  Final-quarter gap (eval - random): {final_gap:+.4f}")
+            final_gap = np.mean(gap_mean[-max(1, len(gap_mean) // 4) :])
+            summary_lines.append(
+                f"  Final-quarter gap (eval - random): {final_gap:+.4f}"
+            )
             if final_gap > 0.5 and verdict != "LEARNING":
                 verdict = "LEARNING"
 
