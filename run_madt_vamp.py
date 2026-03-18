@@ -23,6 +23,7 @@ except ImportError:
 
 from envs.vamp.config import VampConfig
 from envs.env import make_vamp_env, VampEnvWrapper
+from envs.vamp.metadata import write_run_metadata
 from models.gpt_model import GPT, GPTConfig
 from framework.buffer import ReplayBuffer, StateActionReturnDataset
 from framework.rollout import RolloutWorker
@@ -470,6 +471,14 @@ def main():
 
         os.makedirs(args.log_dir, exist_ok=True)
         os.makedirs(args.save_dir, exist_ok=True)
+        write_run_metadata(
+            os.path.join(args.log_dir, "run_metadata.json"),
+            args=args,
+            cfg=cfg,
+            eval_seed_base=args.seed + 1000,
+            random_eval_seed_base=args.seed + 3000,
+            train_seed_base=args.seed + 2000 + runtime['rank'] * 10000,
+        )
         writer = SummaryWriter(args.log_dir) if SummaryWriter is not None else NullSummaryWriter()
         if SummaryWriter is None:
             rank0_print(runtime, "tensorboard is not installed; continuing with a no-op SummaryWriter")

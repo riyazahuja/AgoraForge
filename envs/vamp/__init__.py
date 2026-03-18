@@ -6,4 +6,8 @@ from envs.vamp.conjecture_kernel import ConjectureKernel
 from envs.vamp.query_model import QueryModel
 from envs.vamp.market import BilateralContractMarket
 from envs.vamp.encoding import VampEncoder
-from envs.vamp.vamp_env import VampEnv
+
+try:
+    from envs.vamp.vamp_env import VampEnv
+except ModuleNotFoundError:
+    VampEnv = None

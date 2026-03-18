@@ -10,12 +10,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from envs.vamp.metadata import deserialize_config, load_run_metadata
+from envs.vamp.oracle_solver import solve_public_resolution_oracle
 
 try:
     import matplotlib
@@ -33,6 +42,7 @@ except ImportError:
 AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_return_agent(\d+)$")
 ECON_AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_economic_return_agent(\d+)$")
 QUERY_TAG_PATTERN = re.compile(r"online/query_model_(mae|rmse|feasible_mae|feasible_rmse)_agent(\d+)$")
+TRAJECTORY_JSON_PATTERN = re.compile(r"eval_epoch_(\d+)_thread_(\d+)\.json$")
 
 
 def load_scalar(ea: EventAccumulator, tag: str):
@@ -306,6 +316,153 @@ def plot_mean_returns(all_data, plots_dir):
     print(f"Saved {plots_dir}/mean_returns.png")
 
 
+def aggregate_sequence_series(series_list):
+    if not series_list:
+        return None, None, None
+    min_len = min(len(series) for series in series_list)
+    aligned = np.asarray([series[:min_len] for series in series_list], dtype=np.float64)
+    steps = np.arange(min_len, dtype=np.int32)
+    return steps, np.mean(aligned, axis=0), np.std(aligned, axis=0)
+
+
+def aggregate_mean_std_series(mean_series_list, std_series_list):
+    if not mean_series_list:
+        return None, None, None
+    min_len = min(len(series) for series in mean_series_list)
+    aligned_means = np.asarray(
+        [series[:min_len] for series in mean_series_list],
+        dtype=np.float64,
+    )
+    if std_series_list:
+        aligned_stds = np.asarray(
+            [series[:min_len] for series in std_series_list],
+            dtype=np.float64,
+        )
+    else:
+        aligned_stds = np.zeros_like(aligned_means)
+    steps = np.arange(min_len, dtype=np.int32)
+    mean = np.mean(aligned_means, axis=0)
+    second_moment = np.mean(aligned_stds ** 2 + aligned_means ** 2, axis=0)
+    std = np.sqrt(np.maximum(second_moment - mean ** 2, 0.0))
+    return steps, mean, std
+
+
+def load_latest_eval_trajectory_paths(seed_log_dir: str):
+    traj_dir = os.path.join(seed_log_dir, "trajectories")
+    if not os.path.isdir(traj_dir):
+        return []
+
+    by_epoch = defaultdict(list)
+    for name in sorted(os.listdir(traj_dir)):
+        match = TRAJECTORY_JSON_PATTERN.match(name)
+        if not match:
+            continue
+        epoch = int(match.group(1))
+        by_epoch[epoch].append(os.path.join(traj_dir, name))
+
+    if not by_epoch:
+        return []
+
+    return sorted(by_epoch[max(by_epoch)])
+
+
+def extract_public_resolved_counts(trajectory: dict) -> np.ndarray:
+    counts = [len(trajectory["initial_state"]["public_library"]["resolved"])]
+    counts.extend(
+        len(step["state_after"]["public_library"]["resolved"])
+        for step in trajectory.get("steps", [])
+    )
+    return np.asarray(counts, dtype=np.float64)
+
+
+def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
+    logs_dir = os.path.join(results_dir, "logs")
+    realized_series = []
+    oracle_mean_series = []
+    oracle_std_series = []
+    used_trajectories = 0
+    skipped_oracle = []
+
+    for seed_dir in seed_dirs:
+        seed_log_dir = os.path.join(logs_dir, seed_dir)
+        trajectory_paths = load_latest_eval_trajectory_paths(seed_log_dir)
+        if not trajectory_paths:
+            continue
+
+        cfg = None
+        metadata_path = os.path.join(seed_log_dir, "run_metadata.json")
+        if os.path.exists(metadata_path):
+            metadata = load_run_metadata(metadata_path)
+            cfg = deserialize_config(metadata["config"])
+        else:
+            skipped_oracle.append(seed_dir)
+
+        for trajectory_path in trajectory_paths:
+            with open(trajectory_path, "r", encoding="utf-8") as handle:
+                trajectory = json.load(handle)
+            realized_series.append(extract_public_resolved_counts(trajectory))
+            used_trajectories += 1
+            if cfg is not None:
+                oracle = solve_public_resolution_oracle(cfg, trajectory["initial_state"])
+                oracle_mean_series.append(
+                    np.asarray(oracle["expected_public_resolved_by_time"], dtype=np.float64)
+                )
+                oracle_std_series.append(
+                    np.asarray(oracle.get("public_resolved_std_by_time", []), dtype=np.float64)
+                )
+
+    if not realized_series:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    real_steps, real_mean, real_std = aggregate_sequence_series(realized_series)
+    plot_with_bands(
+        ax,
+        real_steps,
+        real_mean,
+        real_std,
+        label="Observed public resolved",
+        color="tab:blue",
+    )
+
+    oracle_available = False
+    if oracle_mean_series:
+        oracle_steps, oracle_mean, oracle_std = aggregate_mean_std_series(
+            oracle_mean_series,
+            oracle_std_series,
+        )
+        if oracle_steps is not None:
+            oracle_available = True
+            plot_with_bands(
+                ax,
+                oracle_steps,
+                oracle_mean,
+                oracle_std,
+                label="Oracle expected public resolved",
+                color="tab:orange",
+            )
+
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Publicly Resolved Nodes")
+    ax.set_title("Observed vs Oracle Public Resolution Trajectory")
+    ax.grid(True, alpha=0.3)
+    if ax.lines:
+        ax.legend()
+    fig.tight_layout()
+    out_path = os.path.join(plots_dir, "public_resolved_vs_oracle.png")
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+    return {
+        "n_trajectories": int(used_trajectories),
+        "oracle_available": bool(oracle_available),
+        "skipped_oracle_seeds": skipped_oracle,
+        "observed_final_mean": float(real_mean[-1]),
+        "oracle_final_mean": None if not oracle_available else float(oracle_mean[-1]),
+    }
+
+
 def write_trajectory_index(results_dir, trajectory_artifacts):
     if not trajectory_artifacts:
         return
@@ -414,6 +571,7 @@ def main():
     plot_agent_economic_returns(all_data, plots_dir)
     plot_query_model_quality(all_data, plots_dir)
     plot_mean_returns(all_data, plots_dir)
+    public_resolution_summary = plot_public_resolved_vs_oracle(args.results_dir, seed_dirs, plots_dir)
     write_trajectory_index(args.results_dir, trajectory_artifacts)
 
     summary_lines = []
@@ -530,6 +688,24 @@ def main():
         summary_lines.append("\nTrajectory Artifacts:")
         summary_lines.append(f"  HTML files indexed: {len(trajectory_artifacts)}")
         summary_lines.append("  Open results/trajectory_index.html to browse them")
+
+    if public_resolution_summary is not None:
+        summary_lines.append("\nPublic Resolution Trajectory:")
+        summary_lines.append(
+            f"  Trajectories used: {public_resolution_summary['n_trajectories']}"
+        )
+        summary_lines.append(
+            f"  Observed final public resolved: {public_resolution_summary['observed_final_mean']:.4f}"
+        )
+        if public_resolution_summary["oracle_available"]:
+            summary_lines.append(
+                f"  Oracle final public resolved: {public_resolution_summary['oracle_final_mean']:.4f}"
+            )
+        if public_resolution_summary["skipped_oracle_seeds"]:
+            summary_lines.append(
+                "  Oracle skipped for seeds without metadata: "
+                + ", ".join(public_resolution_summary["skipped_oracle_seeds"])
+            )
 
     summary_lines.append(f"\n{'=' * 60}")
     summary_lines.append(f"VERDICT: {verdict}")
