@@ -1,70 +1,66 @@
-"""VampConfig: single dataclass holding all VAMP hyperparameters.
-
-Captures the complete generator tuple:
-    (N, P, L, beta, {A^alpha_mkt}, {Adm^alpha_mkt}, T_mkt, gamma, b_0)
-"""
+"""VampConfig: single dataclass holding all VAMP hyperparameters."""
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+
 import numpy as np
 
 
 @dataclass
 class VampConfig:
     # ── 1a. Agent & formula universes ──
-    F_size: int = 16                    # |F|, must be even (negation pairing: i <-> i + F_size//2)
+    num_theorems: int = 4               # base theorem count n; runtime formula universe has size 2n
+    F_size: Optional[int] = None        # deprecated alias / derived runtime formula count
     n_agents: int = 2                   # |N|
 
     # ── 1b. Latent environment structure (instance data) ──
-    truth_map: Optional[np.ndarray] = None          # shape (F_size,), values {0,1}, T(i)+T(neg(i))=1
-    difficulty_map: Optional[np.ndarray] = None      # shape (F_size,), values (0,1), defined where T=1
-    dependency_adj: Optional[Dict[int, Set[int]]] = None  # delta*(phi) for each phi in F_true, must be acyclic
-    utility_weights: Optional[Dict[Tuple[int, int], float]] = None  # w(psi,phi) in (0,1], w=1 iff psi in delta*(phi)
+    truth_map: Optional[np.ndarray] = None          # shape (num_theorems,), values {0,1}; picks true pair member
+    difficulty_map: Optional[np.ndarray] = None     # shape (num_theorems,), values (0,1)
+    dependency_adj: Optional[Dict[int, Set[int]]] = None  # theorem-id DAG over {0,...,num_theorems-1}
+    utility_weights: Optional[Dict[Tuple[int, int], float]] = None  # theorem-id weights, w(dep,target)
 
     # ── 1c. Initial world state (b_0 specification) ──
-    initial_concrete: Optional[Set[int]] = None      # initial C_0 for all libraries (default: empty)
-    initial_resolved: Optional[Dict[int, Tuple[Set[int], int, int]]] = None  # initial RS_0 (default: empty)
-    initial_public_concrete_prob: float = 0.25       # probability of seeding a formula pair as public concrete at t=0
-    initial_cash: float = 10.0                       # per-agent starting cash
-    gamma: float = 0.99                              # discount factor
-    max_timestep: int = 100                          # episode length / finite horizon
+    initial_concrete: Optional[Set[int]] = None
+    initial_resolved: Optional[Dict[int, Tuple[Set[int], int, int]]] = None
+    initial_public_concrete_prob: float = 0.25
+    initial_cash: float = 10.0
+    gamma: float = 0.99
+    max_timestep: int = 100
 
     # ── 1d. Proof kernel hyperparameters ──
-    kappa: float = 0.5                  # budget concavity, h(tau) = tau^kappa, kappa in (0,1]
-    lambda_diff: float = 1.0            # difficulty-to-rate transform, r_diff(phi) = exp(-lambda_diff * d(phi))
-    alpha_util: float = 1.0             # utility sensitivity exponent in s_mass = sum w(psi,phi)^alpha
-    rho_0: Optional[np.ndarray] = None  # baseline proof rate per agent, shape (n_agents,)
-    rho_1: Optional[np.ndarray] = None  # utility-amplified proof rate per agent, shape (n_agents,)
+    kappa: float = 0.5
+    lambda_diff: float = 1.0
+    alpha_util: float = 1.0
+    rho_0: Optional[np.ndarray] = None
+    rho_1: Optional[np.ndarray] = None
 
     # ── 1e. Conjecture kernel hyperparameters ──
-    beta_conj: float = 1.0              # opportunity mass exponent >= 1
-    eta_0: Optional[np.ndarray] = None  # baseline conjecture rate per agent, shape (n_agents,)
-    eta_1: Optional[np.ndarray] = None  # utility-amplified conjecture rate per agent, shape (n_agents,)
-    kappa_conj_0: Optional[np.ndarray] = None  # selectivity baseline per agent, shape (n_agents,)
-    kappa_conj_1: Optional[np.ndarray] = None  # selectivity budget sensitivity per agent, shape (n_agents,)
-    phi_transform: str = 'identity'     # monotone transform for proposal scores ('identity' or 'log1p')
+    beta_conj: float = 1.0
+    eta_0: Optional[np.ndarray] = None
+    eta_1: Optional[np.ndarray] = None
+    kappa_conj_0: Optional[np.ndarray] = None
+    kappa_conj_1: Optional[np.ndarray] = None
+    phi_transform: str = 'identity'
 
     # ── 1f. Query model hyperparameters ──
-    n_buckets: int = 4                  # legacy field; no longer used by the parametric surrogate
-    horizon_H: int = 20                 # finite horizon H used for query readout
-    prior_a: float = 0.5               # legacy field; no longer used by the parametric surrogate
-    prior_c: float = 1.0               # legacy field; no longer used by the parametric surrogate
+    n_buckets: int = 4
+    horizon_H: int = 20
+    prior_a: float = 0.5
+    prior_c: float = 1.0
     query_init_weight_std: float = 2.0
     query_global_lr: float = 0.03
     query_local_lr: float = 0.15
     query_private_truth_boost: float = 2.0
     query_public_truth_boost: float = 2.5
 
-    # ── 1g. Market mechanism (Mechanism I: Collateralized Bilateral Contracts) ──
+    # ── 1g. Market mechanism ──
     budget_levels: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
     deadline_levels: List[int] = field(default_factory=lambda: [10, 25, 50])
     loss_levels: List[float] = field(default_factory=lambda: [0.25, 0.5])
     price_levels: List[float] = field(default_factory=lambda: [0.1 * i for i in range(1, 11)])
-    max_offers: int = 8                 # max open offers in ledger
-    max_own_offers: int = 4             # max offers per agent
+    max_offers: int = 8
+    max_own_offers: int = 4
 
-    # Optional training-side shaping. These default to zero so the base game
-    # remains unchanged unless explicitly enabled.
     operation_gas_fee: float = 0.0
     publish_resolution_bonus: float = 0.0
     target_init_prob: float = 0.5
@@ -74,13 +70,25 @@ class VampConfig:
     target_init_cash: float = 100.0
 
     # ── 1h. Implementation-side action simplification ──
-    h_max: int = 0                      # query antecedent-width bound
+    h_max: int = 0
 
     def __post_init__(self):
-        # F_size even
-        assert self.F_size % 2 == 0, "F_size must be even for negation pairing"
+        if self.F_size is None:
+            self.F_size = 2 * int(self.num_theorems)
+        else:
+            self.F_size = int(self.F_size)
+            assert self.F_size % 2 == 0, "F_size must be even for negation pairing"
+            inferred_num_theorems = self.F_size // 2
+            if self.num_theorems != 4 and self.num_theorems != inferred_num_theorems:
+                raise AssertionError(
+                    f"num_theorems={self.num_theorems} is inconsistent with F_size={self.F_size}"
+                )
+            self.num_theorems = inferred_num_theorems
 
-        # Default agent capability arrays
+        self.num_theorems = int(self.num_theorems)
+        assert self.num_theorems > 0, "num_theorems must be positive"
+        assert self.F_size == 2 * self.num_theorems, "runtime F_size must equal 2 * num_theorems"
+
         if self.rho_0 is None:
             self.rho_0 = np.ones(self.n_agents) * 0.3
         if self.rho_1 is None:
@@ -94,93 +102,79 @@ class VampConfig:
         if self.kappa_conj_1 is None:
             self.kappa_conj_1 = np.ones(self.n_agents) * 0.1
 
-        # Validate hyperparameter ranges
         assert 0.0 < self.kappa <= 1.0, f"kappa must be in (0,1], got {self.kappa}"
         assert self.lambda_diff > 0, f"lambda_diff must be > 0, got {self.lambda_diff}"
         assert self.alpha_util >= 1.0, f"alpha_util must be >= 1, got {self.alpha_util}"
         assert self.beta_conj >= 1.0, f"beta_conj must be >= 1, got {self.beta_conj}"
-        assert 0.0 <= self.initial_public_concrete_prob <= 1.0, \
-            f"initial_public_concrete_prob must be in [0,1], got {self.initial_public_concrete_prob}"
-        assert self.operation_gas_fee >= 0.0, \
-            f"operation_gas_fee must be >= 0, got {self.operation_gas_fee}"
-        assert self.publish_resolution_bonus >= 0.0, \
-            f"publish_resolution_bonus must be >= 0, got {self.publish_resolution_bonus}"
-        assert 0.0 <= self.target_init_prob <= 1.0, \
-            f"target_init_prob must be in [0,1], got {self.target_init_prob}"
-        assert 0.0 <= self.target_init_min_price <= 1.0, \
-            f"target_init_min_price must be in [0,1], got {self.target_init_min_price}"
-        assert 0.0 <= self.target_init_max_price <= 1.0, \
-            f"target_init_max_price must be in [0,1], got {self.target_init_max_price}"
-        assert self.target_init_min_price <= self.target_init_max_price, \
-            "target_init_min_price must be <= target_init_max_price"
-        assert self.target_init_max_quantity >= 0, \
-            f"target_init_max_quantity must be >= 0, got {self.target_init_max_quantity}"
-        assert self.target_init_cash >= 0.0, \
-            f"target_init_cash must be >= 0, got {self.target_init_cash}"
-        assert self.phi_transform in ('identity', 'log1p'), \
-            f"phi_transform must be 'identity' or 'log1p', got {self.phi_transform}"
+        assert 0.0 <= self.initial_public_concrete_prob <= 1.0
+        assert self.operation_gas_fee >= 0.0
+        assert self.publish_resolution_bonus >= 0.0
+        assert 0.0 <= self.target_init_prob <= 1.0
+        assert 0.0 <= self.target_init_min_price <= 1.0
+        assert 0.0 <= self.target_init_max_price <= 1.0
+        assert self.target_init_min_price <= self.target_init_max_price
+        assert self.target_init_max_quantity >= 0
+        assert self.target_init_cash >= 0.0
+        assert self.phi_transform in ('identity', 'log1p')
 
-        # Validate agent array shapes
         for name in ('rho_0', 'rho_1', 'eta_0', 'eta_1', 'kappa_conj_0', 'kappa_conj_1'):
             arr = getattr(self, name)
             assert arr.shape == (self.n_agents,), \
                 f"{name} must have shape ({self.n_agents},), got {arr.shape}"
 
-        # Validate instance data if provided
         if self.truth_map is not None:
             self._validate_truth_map()
+        if self.difficulty_map is not None:
+            self._validate_difficulty_map()
         if self.dependency_adj is not None:
             self._validate_dependency_adj()
         if self.utility_weights is not None and self.dependency_adj is not None:
             self._validate_utility_weights()
 
     def _validate_truth_map(self):
-        assert self.truth_map.shape == (self.F_size,), \
-            f"truth_map must have shape ({self.F_size},), got {self.truth_map.shape}"
-        half = self.half_F
-        for i in range(half):
-            assert self.truth_map[i] + self.truth_map[i + half] == 1, \
-                f"T({i}) + T({i + half}) must equal 1"
+        assert self.truth_map.shape == (self.num_theorems,), \
+            f"truth_map must have shape ({self.num_theorems},), got {self.truth_map.shape}"
+        assert np.all(np.isin(self.truth_map, [0, 1])), "truth_map must contain only 0/1 pair-member indicators"
+
+    def _validate_difficulty_map(self):
+        assert self.difficulty_map.shape == (self.num_theorems,), \
+            f"difficulty_map must have shape ({self.num_theorems},), got {self.difficulty_map.shape}"
 
     def _validate_dependency_adj(self):
-        # Check acyclicity via topological sort (Kahn's algorithm)
-        true_formulas = set(self.dependency_adj.keys())
-        in_degree = {phi: 0 for phi in true_formulas}
-        for phi, deps in self.dependency_adj.items():
-            for d in deps:
-                if d in in_degree:
-                    in_degree[d] = in_degree.get(d, 0)  # already initialized
+        nodes = set(range(self.num_theorems))
+        for theorem_id, deps in self.dependency_adj.items():
+            assert theorem_id in nodes, f"invalid theorem id {theorem_id} in dependency_adj"
+            for dep in deps:
+                assert dep in nodes, f"invalid dependency id {dep} in dependency_adj[{theorem_id}]"
 
-        # Build forward edges: dep -> dependents
-        forward = {phi: set() for phi in true_formulas}
-        for phi, deps in self.dependency_adj.items():
-            for d in deps:
-                if d in forward:
-                    forward[d].add(phi)
-                    in_degree[phi] += 1
+        in_degree = {theorem_id: 0 for theorem_id in nodes}
+        forward = {theorem_id: set() for theorem_id in nodes}
+        for theorem_id, deps in self.dependency_adj.items():
+            for dep in deps:
+                forward[dep].add(theorem_id)
+                in_degree[theorem_id] += 1
 
-        queue = [phi for phi, deg in in_degree.items() if deg == 0]
+        queue = [theorem_id for theorem_id, deg in in_degree.items() if deg == 0]
         visited = 0
         while queue:
             node = queue.pop()
             visited += 1
-            for neighbor in forward.get(node, set()):
+            for neighbor in forward[node]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
-        assert visited == len(true_formulas), \
-            "dependency_adj must induce an acyclic digraph"
+        assert visited == len(nodes), "dependency_adj must induce an acyclic digraph"
 
     def _validate_utility_weights(self):
-        for phi, deps in self.dependency_adj.items():
-            for psi in deps:
-                key = (psi, phi)
+        for theorem_id, deps in self.dependency_adj.items():
+            for dep in deps:
+                key = (dep, theorem_id)
                 assert key in self.utility_weights and self.utility_weights[key] == 1.0, \
-                    f"w({psi},{phi}) must be 1.0 since {psi} in delta*({phi})"
+                    f"w({dep},{theorem_id}) must be 1.0 since {dep} is a dependency of {theorem_id}"
 
     @property
     def half_F(self):
-        return self.F_size // 2
+        return self.num_theorems
 
     @property
     def n_budget_levels(self):
@@ -198,7 +192,17 @@ class VampConfig:
     def n_price_levels(self):
         return len(self.price_levels)
 
+    def formula_from_pair(self, sign: int, theorem_id: int) -> int:
+        assert sign in (0, 1), f"sign must be 0/1, got {sign}"
+        assert 0 <= theorem_id < self.num_theorems, f"invalid theorem_id {theorem_id}"
+        return theorem_id + sign * self.num_theorems
+
+    def pair_sign(self, phi: int) -> int:
+        return 0 if phi < self.num_theorems else 1
+
+    def theorem_id(self, phi: int) -> int:
+        return phi % self.num_theorems
+
     def neg(self, i: int) -> int:
-        """Return the negation index of formula i."""
-        half = self.half_F
-        return i + half if i < half else i - half
+        theorem_id = self.theorem_id(i)
+        return self.formula_from_pair(1 - self.pair_sign(i), theorem_id)

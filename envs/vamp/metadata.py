@@ -12,17 +12,12 @@ from envs.vamp.config import VampConfig
 
 
 def serialize_config(cfg: VampConfig) -> Dict[str, Any]:
-    """Convert a populated VampConfig into a JSON-safe dictionary."""
     dependency_adj = {
-        str(int(phi)): sorted(int(dep) for dep in deps)
-        for phi, deps in (cfg.dependency_adj or {}).items()
+        str(int(theorem_id)): sorted(int(dep) for dep in deps)
+        for theorem_id, deps in (cfg.dependency_adj or {}).items()
     }
     utility_weights = [
-        {
-            "src": int(src),
-            "dst": int(dst),
-            "weight": float(weight),
-        }
+        {"src": int(src), "dst": int(dst), "weight": float(weight)}
         for (src, dst), weight in sorted((cfg.utility_weights or {}).items())
     ]
     initial_resolved = {
@@ -34,6 +29,7 @@ def serialize_config(cfg: VampConfig) -> Dict[str, Any]:
         for phi, (deps, solve_time, solver) in (cfg.initial_resolved or {}).items()
     }
     return {
+        "num_theorems": int(cfg.num_theorems),
         "F_size": int(cfg.F_size),
         "n_agents": int(cfg.n_agents),
         "truth_map": None if cfg.truth_map is None else [int(v) for v in cfg.truth_map.tolist()],
@@ -83,11 +79,61 @@ def serialize_config(cfg: VampConfig) -> Dict[str, Any]:
     }
 
 
+def _normalize_legacy_instance_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    if data.get("num_theorems") is not None:
+        return data
+
+    legacy_f_size = int(data["F_size"])
+    num_theorems = legacy_f_size // 2
+    truth_map = np.asarray(data["truth_map"], dtype=np.int32)
+    difficulty_map = np.asarray(data["difficulty_map"], dtype=np.float64)
+
+    theorem_truth_map = np.zeros(num_theorems, dtype=np.int32)
+    theorem_difficulty_map = np.zeros(num_theorems, dtype=np.float64)
+    for theorem_id in range(num_theorems):
+        lower_phi = theorem_id
+        upper_phi = theorem_id + num_theorems
+        theorem_truth_map[theorem_id] = 1 if truth_map[upper_phi] == 1 else 0
+        theorem_difficulty_map[theorem_id] = max(
+            float(difficulty_map[lower_phi]),
+            float(difficulty_map[upper_phi]),
+        )
+
+    dependency_adj = {}
+    for phi, deps in (data.get("dependency_adj") or {}).items():
+        phi_int = int(phi)
+        if phi_int >= num_theorems and truth_map[phi_int] == 1:
+            dependency_adj[str(phi_int - num_theorems)] = sorted(int(dep) % num_theorems for dep in deps)
+        elif phi_int < num_theorems and truth_map[phi_int] == 1:
+            dependency_adj[str(phi_int)] = sorted(int(dep) % num_theorems for dep in deps)
+
+    utility_weights = []
+    for item in data.get("utility_weights") or []:
+        src = int(item["src"])
+        dst = int(item["dst"])
+        if truth_map[src] == 1 and truth_map[dst] == 1:
+            utility_weights.append(
+                {
+                    "src": src % num_theorems,
+                    "dst": dst % num_theorems,
+                    "weight": float(item["weight"]),
+                }
+            )
+
+    normalized = dict(data)
+    normalized["num_theorems"] = num_theorems
+    normalized["truth_map"] = theorem_truth_map.tolist()
+    normalized["difficulty_map"] = theorem_difficulty_map.tolist()
+    normalized["dependency_adj"] = dependency_adj
+    normalized["utility_weights"] = utility_weights
+    return normalized
+
+
 def deserialize_config(data: Dict[str, Any]) -> VampConfig:
-    """Reconstruct a VampConfig from a serialized dictionary."""
+    data = _normalize_legacy_instance_data(data)
     dependency_adj = {
-        int(phi): set(int(dep) for dep in deps)
-        for phi, deps in (data.get("dependency_adj") or {}).items()
+        int(theorem_id): set(int(dep) for dep in deps)
+        for theorem_id, deps in (data.get("dependency_adj") or {}).items()
     }
     utility_weights = {
         (int(item["src"]), int(item["dst"])): float(item["weight"])
@@ -102,7 +148,8 @@ def deserialize_config(data: Dict[str, Any]) -> VampConfig:
         for phi, info in (data.get("initial_resolved") or {}).items()
     }
     return VampConfig(
-        F_size=int(data["F_size"]),
+        num_theorems=int(data["num_theorems"]),
+        F_size=int(data.get("F_size", 2 * int(data["num_theorems"]))),
         n_agents=int(data["n_agents"]),
         truth_map=None if data.get("truth_map") is None else np.asarray(data["truth_map"], dtype=np.int32),
         difficulty_map=None if data.get("difficulty_map") is None else np.asarray(data["difficulty_map"], dtype=np.float64),
@@ -160,9 +207,8 @@ def write_run_metadata(
     random_eval_seed_base: int,
     train_seed_base: int,
 ) -> None:
-    """Persist run metadata needed for later oracle analysis."""
     payload = {
-        "format_version": 1,
+        "format_version": 2,
         "args": {key: value for key, value in vars(args).items()},
         "config": serialize_config(cfg),
         "seeds": {
@@ -178,5 +224,4 @@ def write_run_metadata(
 
 
 def load_run_metadata(path: str | Path) -> Dict[str, Any]:
-    """Load previously written run metadata."""
     return json.loads(Path(path).read_text(encoding="utf-8"))

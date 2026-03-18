@@ -1,12 +1,9 @@
-"""FormulaGraph: static latent structure holder for VAMP environments.
-
-Constructed from VampConfig instance data fields. Holds truth map,
-difficulty map, dependency adjacency, and utility weights.
-"""
+"""FormulaGraph: lifted paired-formula view of a theorem-level VAMP instance."""
 
 from __future__ import annotations
 
 from typing import Dict, Optional, Set, Tuple
+
 import numpy as np
 
 
@@ -15,50 +12,93 @@ class FormulaGraph:
 
     def __init__(
         self,
-        F_size: int,
+        num_theorems: int,
         truth_map: np.ndarray,
         difficulty_map: np.ndarray,
         dependency_adj: Dict[int, Set[int]],
         utility_weights: Dict[Tuple[int, int], float],
     ):
-        self.F_size = F_size
-        self.half_F = F_size // 2
-        self.truth_map = truth_map.copy()
-        self.difficulty_map = difficulty_map.copy()
-        self.dependency_adj = {k: set(v) for k, v in dependency_adj.items()}
-        self.utility_weights = dict(utility_weights)
+        self.num_theorems = int(num_theorems)
+        self.F_size = 2 * self.num_theorems
+        self.half_F = self.num_theorems
 
-        # Derived: set of true formulas
-        self.true_formulas: Set[int] = {i for i in range(F_size) if truth_map[i] == 1}
+        self.theorem_truth_map = truth_map.copy()
+        self.theorem_difficulty_map = difficulty_map.copy()
+        self.theorem_dependency_adj = {k: set(v) for k, v in dependency_adj.items()}
+        self.theorem_utility_weights = dict(utility_weights)
 
-        # Validate
+        self.truth_map = np.zeros(self.F_size, dtype=np.int32)
+        self.difficulty_map = np.zeros(self.F_size, dtype=np.float64)
+        self.dependency_adj: Dict[int, Set[int]] = {}
+        self.utility_weights: Dict[Tuple[int, int], float] = {}
+
+        for theorem_id in range(self.num_theorems):
+            true_phi = self.true_formula(theorem_id)
+            false_phi = self.neg(true_phi)
+            self.truth_map[true_phi] = 1
+            self.truth_map[false_phi] = 0
+            difficulty = float(self.theorem_difficulty_map[theorem_id])
+            self.difficulty_map[true_phi] = difficulty
+            self.difficulty_map[false_phi] = difficulty
+
+        for theorem_id in range(self.num_theorems):
+            true_phi = self.true_formula(theorem_id)
+            lifted_deps = {self.true_formula(dep) for dep in self.theorem_dependency_adj.get(theorem_id, set())}
+            self.dependency_adj[true_phi] = lifted_deps
+
+        for src_theorem in range(self.num_theorems):
+            src_phi = self.true_formula(src_theorem)
+            for dst_theorem in range(self.num_theorems):
+                if src_theorem == dst_theorem:
+                    continue
+                dst_phi = self.true_formula(dst_theorem)
+                weight = float(self.theorem_utility_weights.get((src_theorem, dst_theorem), 0.0))
+                if weight > 0.0:
+                    self.utility_weights[(src_phi, dst_phi)] = weight
+
+        self.true_formulas: Set[int] = {
+            self.true_formula(theorem_id) for theorem_id in range(self.num_theorems)
+        }
+
         self._validate_dag()
         self._validate_weights()
 
+    def formula_from_pair(self, sign: int, theorem_id: int) -> int:
+        return theorem_id + sign * self.num_theorems
+
+    def pair_sign(self, phi: int) -> int:
+        return 0 if phi < self.num_theorems else 1
+
+    def theorem_id(self, phi: int) -> int:
+        return phi % self.num_theorems
+
     def neg(self, i: int) -> int:
-        """Negation: i <-> i + half_F."""
-        return i + self.half_F if i < self.half_F else i - self.half_F
+        theorem_id = self.theorem_id(i)
+        return self.formula_from_pair(1 - self.pair_sign(i), theorem_id)
+
+    def true_formula(self, theorem_id: int) -> int:
+        sign = int(self.theorem_truth_map[theorem_id])
+        return self.formula_from_pair(sign, theorem_id)
+
+    def false_formula(self, theorem_id: int) -> int:
+        return self.neg(self.true_formula(theorem_id))
 
     def is_true(self, phi: int) -> bool:
         return self.truth_map[phi] == 1
 
     def get_difficulty(self, phi: int) -> float:
-        return float(self.difficulty_map[phi])
+        return float(self.theorem_difficulty_map[self.theorem_id(phi)])
 
     def get_deps(self, phi: int) -> Set[int]:
-        """Return delta*(phi), the dependency set of phi."""
         return self.dependency_adj.get(phi, set())
 
     def get_weight(self, psi: int, phi: int) -> float:
-        """Return w(psi, phi)."""
         return self.utility_weights.get((psi, phi), 0.0)
 
     def in_degree(self, phi: int) -> int:
-        """Number of direct dependencies of phi."""
         return len(self.dependency_adj.get(phi, set()))
 
     def out_degree(self, phi: int) -> int:
-        """Number of formulas that directly depend on phi."""
         count = 0
         for deps in self.dependency_adj.values():
             if phi in deps:
@@ -66,18 +106,16 @@ class FormulaGraph:
         return count
 
     def ghost_formulas(self, concrete: Set[int]) -> Set[int]:
-        """G(L) = F \\ C -- formulas not yet concrete."""
         return set(range(self.F_size)) - concrete
 
     def _validate_dag(self):
-        """Validate that dependency_adj induces an acyclic digraph via topological sort."""
-        nodes = set(self.dependency_adj.keys())
+        nodes = set(self.true_formulas)
         in_degree = {phi: 0 for phi in nodes}
         forward = {phi: set() for phi in nodes}
         for phi, deps in self.dependency_adj.items():
-            for d in deps:
-                if d in nodes:
-                    forward[d].add(phi)
+            for dep in deps:
+                if dep in nodes:
+                    forward[dep].add(phi)
                     in_degree[phi] += 1
 
         queue = [phi for phi, deg in in_degree.items() if deg == 0]
@@ -92,17 +130,15 @@ class FormulaGraph:
         assert visited == len(nodes), "dependency_adj must induce an acyclic digraph"
 
     def _validate_weights(self):
-        """Validate w(psi,phi)=1 iff psi in delta*(phi)."""
         for phi, deps in self.dependency_adj.items():
             for psi in deps:
                 w = self.utility_weights.get((psi, phi), 0.0)
-                assert w == 1.0, f"w({psi},{phi}) must be 1.0 since {psi} in delta*({phi})"
+                assert w == 1.0, f"w({psi},{phi}) must be 1.0 since {psi} is a dependency of {phi}"
 
     @classmethod
     def from_config(cls, cfg) -> FormulaGraph:
-        """Construct from a VampConfig with populated instance data."""
         return cls(
-            F_size=cfg.F_size,
+            num_theorems=cfg.num_theorems,
             truth_map=cfg.truth_map,
             difficulty_map=cfg.difficulty_map,
             dependency_adj=cfg.dependency_adj,
@@ -112,63 +148,34 @@ class FormulaGraph:
     @classmethod
     def random(
         cls,
-        F_size: int = 16,
+        num_theorems: int = 4,
         density: float = 0.3,
         rng: Optional[np.random.Generator] = None,
     ) -> FormulaGraph:
-        """Generate a valid random FormulaGraph instance.
-
-        Args:
-            F_size: formula universe size (must be even)
-            density: probability of an edge in the dependency DAG
-            rng: numpy random generator
-        """
-        assert F_size % 2 == 0
         if rng is None:
             rng = np.random.default_rng()
 
-        half = F_size // 2
+        truth_map = rng.integers(0, 2, size=num_theorems, dtype=np.int32)
+        difficulty_map = rng.uniform(0.05, 0.95, size=num_theorems).astype(np.float64)
 
-        # Truth map: for each pair (i, i+half), assign one as true
-        truth_map = np.zeros(F_size, dtype=np.int32)
-        for i in range(half):
-            if rng.random() < 0.5:
-                truth_map[i] = 1
-            else:
-                truth_map[i + half] = 1
-
-        # Difficulty map: uniform in (0,1) for true formulas
-        difficulty_map = np.zeros(F_size, dtype=np.float64)
-        for i in range(F_size):
-            if truth_map[i] == 1:
-                difficulty_map[i] = rng.uniform(0.05, 0.95)
-
-        # Dependency adjacency: random DAG among true formulas
-        true_formulas = sorted([i for i in range(F_size) if truth_map[i] == 1])
-        dependency_adj: Dict[int, Set[int]] = {phi: set() for phi in true_formulas}
-
-        # Use topological ordering = sorted order to ensure acyclicity
-        # Edge from true_formulas[j] -> true_formulas[i] means j is a dep of i (j < i)
-        for idx_i, phi in enumerate(true_formulas):
-            for idx_j in range(idx_i):
-                psi = true_formulas[idx_j]
+        dependency_adj: Dict[int, Set[int]] = {theorem_id: set() for theorem_id in range(num_theorems)}
+        for theorem_id in range(num_theorems):
+            for dep in range(theorem_id):
                 if rng.random() < density:
-                    dependency_adj[phi].add(psi)
+                    dependency_adj[theorem_id].add(dep)
 
-        # Utility weights: w(psi,phi) = 1.0 for deps, random in (0,1) for other pairs
         utility_weights: Dict[Tuple[int, int], float] = {}
-        for phi in true_formulas:
-            for psi in true_formulas:
-                if psi == phi:
+        for target in range(num_theorems):
+            for source in range(num_theorems):
+                if source == target:
                     continue
-                if psi in dependency_adj[phi]:
-                    utility_weights[(psi, phi)] = 1.0
+                if source in dependency_adj[target]:
+                    utility_weights[(source, target)] = 1.0
                 else:
-                    w = rng.uniform(0.01, 0.99)
-                    utility_weights[(psi, phi)] = w
+                    utility_weights[(source, target)] = float(rng.uniform(0.01, 0.99))
 
         return cls(
-            F_size=F_size,
+            num_theorems=num_theorems,
             truth_map=truth_map,
             difficulty_map=difficulty_map,
             dependency_adj=dependency_adj,

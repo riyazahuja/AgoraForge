@@ -36,12 +36,12 @@ class VampEnv(MultiAgentEnv):
         if cfg.truth_map is not None:
             self.graph = FormulaGraph.from_config(cfg)
         else:
-            self.graph = FormulaGraph.random(cfg.F_size, rng=self.rng)
+            self.graph = FormulaGraph.random(cfg.num_theorems, rng=self.rng)
             # Populate config with generated data for consistency
-            cfg.truth_map = self.graph.truth_map
-            cfg.difficulty_map = self.graph.difficulty_map
-            cfg.dependency_adj = self.graph.dependency_adj
-            cfg.utility_weights = self.graph.utility_weights
+            cfg.truth_map = self.graph.theorem_truth_map
+            cfg.difficulty_map = self.graph.theorem_difficulty_map
+            cfg.dependency_adj = self.graph.theorem_dependency_adj
+            cfg.utility_weights = self.graph.theorem_utility_weights
 
         # Kernels
         self.proof_kernel = ProofKernel.from_config(cfg)

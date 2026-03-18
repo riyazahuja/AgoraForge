@@ -31,7 +31,8 @@ from envs.env import make_vamp_env
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate offline VAMP data')
-    parser.add_argument('--F_size', type=int, default=8)
+    parser.add_argument('--num_theorems', type=int, default=4)
+    parser.add_argument('--F_size', type=int, default=None)
     parser.add_argument('--n_agents', type=int, default=2)
     parser.add_argument('--max_timestep', type=int, default=100)
     parser.add_argument('--n_episodes', type=int, default=100)
@@ -71,6 +72,7 @@ def main():
     args = parse_args()
 
     cfg = VampConfig(
+        num_theorems=args.num_theorems,
         F_size=args.F_size,
         n_agents=args.n_agents,
         max_timestep=args.max_timestep,
@@ -89,7 +91,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Generating {args.n_episodes} episodes with {args.policy} policy")
-    print(f"F={args.F_size}, N={args.n_agents}, T={args.max_timestep}")
+    print(f"n={cfg.num_theorems}, F={cfg.F_size}, N={args.n_agents}, T={args.max_timestep}")
 
     for ep in range(args.n_episodes):
         obs, share_obs, avail = env.reset()

@@ -97,7 +97,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MADT training on VAMP environment')
 
     # Environment
-    parser.add_argument('--F_size', type=int, default=8, help='Formula universe size')
+    parser.add_argument('--num_theorems', type=int, default=4,
+                        help='Base theorem count n; runtime paired formula universe has size 2n')
+    parser.add_argument('--F_size', type=int, default=None,
+                        help='Deprecated alias for runtime paired formula universe size (must equal 2*num_theorems)')
     parser.add_argument('--n_agents', type=int, default=2, help='Number of agents')
     parser.add_argument('--max_timestep', type=int, default=100, help='Episode length')
     parser.add_argument('--initial_cash', type=float, default=10.0, help='Starting cash per agent')
@@ -201,6 +204,7 @@ def parse_args():
 
 def build_config(args) -> VampConfig:
     return VampConfig(
+        num_theorems=args.num_theorems,
         F_size=args.F_size,
         n_agents=args.n_agents,
         max_timestep=args.max_timestep,
@@ -402,7 +406,7 @@ def main():
     action_dim = tmp_env.get_total_actions()
     del tmp_env
 
-    rank0_print(runtime, f"VAMP: F={cfg.F_size}, N={cfg.n_agents}, T={cfg.max_timestep}")
+    rank0_print(runtime, f"VAMP: n={cfg.num_theorems}, F={cfg.F_size}, N={cfg.n_agents}, T={cfg.max_timestep}")
     rank0_print(runtime, f"Dims: local_obs={local_obs_dim}, global_obs={global_obs_dim}, action={action_dim}")
     if runtime['distributed']:
         rank0_print(runtime, f"Distributed training enabled across {runtime['world_size']} ranks")

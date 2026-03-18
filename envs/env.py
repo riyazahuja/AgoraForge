@@ -34,11 +34,11 @@ def _ensure_graph_populated(cfg: VampConfig, seed: int = 0) -> None:
     """
     if cfg.truth_map is None:
         rng = np.random.default_rng(seed)
-        graph = FormulaGraph.random(cfg.F_size, rng=rng)
-        cfg.truth_map = graph.truth_map
-        cfg.difficulty_map = graph.difficulty_map
-        cfg.dependency_adj = graph.dependency_adj
-        cfg.utility_weights = graph.utility_weights
+        graph = FormulaGraph.random(cfg.num_theorems, rng=rng)
+        cfg.truth_map = graph.theorem_truth_map
+        cfg.difficulty_map = graph.theorem_difficulty_map
+        cfg.dependency_adj = graph.theorem_dependency_adj
+        cfg.utility_weights = graph.theorem_utility_weights
 
 
 def make_parallel_env(n_envs: int, cfg: Optional[VampConfig] = None, seed: int = 0):

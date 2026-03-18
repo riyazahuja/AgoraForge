@@ -31,7 +31,7 @@ for SEED in "${SEEDS[@]}"; do
     "${LAUNCHER[@]}" run_madt_vamp.py \
         "${DIST_ARGS[@]}" \
         --seed "${SEED}" \
-        --F_size 8 \
+        --num_theorems 4 \
         --n_agents 2 \
         --max_timestep 100 \
         --online_buffer_size 8 \
