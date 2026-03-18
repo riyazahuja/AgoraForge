@@ -5,6 +5,26 @@ from .utils import get_model_device, sample
 from .utils import padding_obs, padding_ava
 
 
+def _terminal_snapshot_from_info(info):
+    if isinstance(info, list):
+        for item in info:
+            if isinstance(item, dict) and item.get('terminal_snapshot') is not None:
+                return item['terminal_snapshot']
+        return None
+    if isinstance(info, dict):
+        return info.get('terminal_snapshot')
+    return None
+
+
+def _state_after_snapshot(info, post_snapshot, done_flag):
+    """Prefer the terminal snapshot over the post-reset snapshot on done steps."""
+    if done_flag:
+        terminal_snapshot = _terminal_snapshot_from_info(info)
+        if terminal_snapshot is not None:
+            return terminal_snapshot
+    return post_snapshot
+
+
 class RolloutWorker:
 
     def __init__(self, model, critic_model, buffer, global_obs_dim, local_obs_dim, action_dim):
@@ -114,6 +134,7 @@ class RolloutWorker:
                     ]
                     cumulative_economic_returns[n] += np.asarray(economic_rewards, dtype=np.float64)
                     cumulative_shaping_returns[n] += np.asarray(shaping_rewards, dtype=np.float64)
+                    done_flag = bool(np.all(dones[n]))
                     item['steps'].append({
                         'step_index': int(len(item['steps'])),
                         'action_indices': [int(v) for v in action_indices[n].tolist()],
@@ -128,9 +149,13 @@ class RolloutWorker:
                         'cumulative_shaping_returns': [
                             float(v) for v in cumulative_shaping_returns[n].tolist()
                         ],
-                        'done': bool(np.all(dones[n])),
+                        'done': done_flag,
                         'state_before': pre_snapshots[n],
-                        'state_after': post_snapshots[n],
+                        'state_after': _state_after_snapshot(
+                            infos[n],
+                            post_snapshots[n],
+                            done_flag,
+                        ),
                     })
 
             if train:

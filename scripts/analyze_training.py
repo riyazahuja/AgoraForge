@@ -16,8 +16,10 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
+from matplotlib.patches import Patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -25,6 +27,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from envs.vamp.metadata import deserialize_config, load_run_metadata
 from envs.vamp.oracle_solver import solve_public_resolution_oracle
+from scripts.trajectory_viewer import write_trajectory_viewer_html
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 try:
     import matplotlib
@@ -36,7 +41,7 @@ except ImportError:
 try:
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 except ImportError:
-    sys.exit("tensorboard is required: uv pip install tensorboard")
+    EventAccumulator = None
 
 
 AGENT_TAG_PATTERN = re.compile(r"online/(train|eval)_return_agent(\d+)$")
@@ -63,7 +68,7 @@ def load_all_seeds(results_dir: str):
         sys.exit(f"No seed directories found in {logs_dir}")
 
     all_data: dict[str, list[tuple[np.ndarray, np.ndarray]]] = defaultdict(list)
-    trajectory_artifacts = []
+    trajectory_records = []
     tags_of_interest = {
         "online/eval_return",
         "online/eval_economic_return",
@@ -86,30 +91,28 @@ def load_all_seeds(results_dir: str):
 
     for sd in seed_dirs:
         path = os.path.join(logs_dir, sd)
-        ea = EventAccumulator(path)
-        ea.Reload()
-        available = set(ea.Tags().get("scalars", []))
-        dynamic_agent_tags = {
-            tag for tag in available
-            if AGENT_TAG_PATTERN.match(tag) or ECON_AGENT_TAG_PATTERN.match(tag)
-        }
-        dynamic_query_tags = {tag for tag in available if QUERY_TAG_PATTERN.match(tag)}
-        for tag in tags_of_interest | dynamic_agent_tags | dynamic_query_tags:
-            if tag in available:
-                steps, values = load_scalar(ea, tag)
-                all_data[tag].append((steps, values))
+        if EventAccumulator is not None:
+            ea = EventAccumulator(path)
+            ea.Reload()
+            available = set(ea.Tags().get("scalars", []))
+            dynamic_agent_tags = {
+                tag for tag in available
+                if AGENT_TAG_PATTERN.match(tag) or ECON_AGENT_TAG_PATTERN.match(tag)
+            }
+            dynamic_query_tags = {tag for tag in available if QUERY_TAG_PATTERN.match(tag)}
+            for tag in tags_of_interest | dynamic_agent_tags | dynamic_query_tags:
+                if tag in available:
+                    steps, values = load_scalar(ea, tag)
+                    all_data[tag].append((steps, values))
 
-        traj_dir = os.path.join(path, "trajectories")
-        if os.path.isdir(traj_dir):
-            for name in sorted(os.listdir(traj_dir)):
-                if name.endswith(".html"):
-                    trajectory_artifacts.append({
-                        'seed_dir': sd,
-                        'html_path': os.path.join(traj_dir, name),
-                        'label': name,
-                    })
+        for trajectory_path in load_latest_eval_trajectory_paths(path):
+            trajectory_records.append({
+                'seed_dir': sd,
+                'json_path': trajectory_path,
+                'label': os.path.basename(trajectory_path),
+            })
 
-    return all_data, seed_dirs, trajectory_artifacts
+    return all_data, seed_dirs, trajectory_records
 
 
 def align_and_aggregate(series_list):
@@ -348,9 +351,16 @@ def aggregate_mean_std_series(mean_series_list, std_series_list):
 
 
 def load_latest_eval_trajectory_paths(seed_log_dir: str):
+    by_epoch = load_eval_trajectory_paths_by_epoch(seed_log_dir)
+    if not by_epoch:
+        return []
+    return sorted(by_epoch[max(by_epoch)])
+
+
+def load_eval_trajectory_paths_by_epoch(seed_log_dir: str) -> dict[int, list[str]]:
     traj_dir = os.path.join(seed_log_dir, "trajectories")
     if not os.path.isdir(traj_dir):
-        return []
+        return {}
 
     by_epoch = defaultdict(list)
     for name in sorted(os.listdir(traj_dir)):
@@ -360,10 +370,10 @@ def load_latest_eval_trajectory_paths(seed_log_dir: str):
         epoch = int(match.group(1))
         by_epoch[epoch].append(os.path.join(traj_dir, name))
 
-    if not by_epoch:
-        return []
-
-    return sorted(by_epoch[max(by_epoch)])
+    return {
+        epoch: sorted(paths)
+        for epoch, paths in by_epoch.items()
+    }
 
 
 def extract_public_resolved_counts(trajectory: dict) -> np.ndarray:
@@ -375,18 +385,34 @@ def extract_public_resolved_counts(trajectory: dict) -> np.ndarray:
     return np.asarray(counts, dtype=np.float64)
 
 
+def select_highlight_epochs(epochs: list[int], max_highlights: int = 6) -> list[int]:
+    if not epochs:
+        return []
+    if len(epochs) <= max_highlights:
+        return list(epochs)
+
+    positions = np.linspace(0, len(epochs) - 1, num=max_highlights)
+    selected = []
+    seen = set()
+    for pos in positions:
+        epoch = epochs[int(round(pos))]
+        if epoch not in seen:
+            selected.append(epoch)
+            seen.add(epoch)
+    return selected
+
+
 def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
     logs_dir = os.path.join(results_dir, "logs")
-    realized_series = []
-    oracle_mean_series = []
-    oracle_std_series = []
+    realized_series_by_epoch = defaultdict(list)
+    oracle_inputs_by_epoch = defaultdict(list)
     used_trajectories = 0
     skipped_oracle = []
 
     for seed_dir in seed_dirs:
         seed_log_dir = os.path.join(logs_dir, seed_dir)
-        trajectory_paths = load_latest_eval_trajectory_paths(seed_log_dir)
-        if not trajectory_paths:
+        trajectory_paths_by_epoch = load_eval_trajectory_paths_by_epoch(seed_log_dir)
+        if not trajectory_paths_by_epoch:
             continue
 
         cfg = None
@@ -397,57 +423,137 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
         else:
             skipped_oracle.append(seed_dir)
 
-        for trajectory_path in trajectory_paths:
-            with open(trajectory_path, "r", encoding="utf-8") as handle:
-                trajectory = json.load(handle)
-            realized_series.append(extract_public_resolved_counts(trajectory))
-            used_trajectories += 1
-            if cfg is not None:
-                oracle = solve_public_resolution_oracle(cfg, trajectory["initial_state"])
-                oracle_mean_series.append(
-                    np.asarray(oracle["expected_public_resolved_by_time"], dtype=np.float64)
-                )
-                oracle_std_series.append(
-                    np.asarray(oracle.get("public_resolved_std_by_time", []), dtype=np.float64)
-                )
+        for epoch, trajectory_paths in sorted(trajectory_paths_by_epoch.items()):
+            for trajectory_path in trajectory_paths:
+                with open(trajectory_path, "r", encoding="utf-8") as handle:
+                    trajectory = json.load(handle)
+                realized_series_by_epoch[epoch].append(extract_public_resolved_counts(trajectory))
+                used_trajectories += 1
+                if cfg is not None:
+                    oracle_inputs_by_epoch[epoch].append((cfg, trajectory["initial_state"]))
 
-    if not realized_series:
+    if not realized_series_by_epoch:
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    real_steps, real_mean, real_std = aggregate_sequence_series(realized_series)
-    plot_with_bands(
-        ax,
-        real_steps,
-        real_mean,
-        real_std,
-        label="Observed public resolved",
-        color="tab:blue",
-    )
+    epochs = sorted(realized_series_by_epoch)
+    latest_epoch = epochs[-1]
+    observed_mean_by_epoch: dict[int, np.ndarray] = {}
+    oracle_mean_by_epoch: dict[int, np.ndarray] = {}
 
-    oracle_available = False
-    if oracle_mean_series:
-        oracle_steps, oracle_mean, oracle_std = aggregate_mean_std_series(
-            oracle_mean_series,
-            oracle_std_series,
-        )
-        if oracle_steps is not None:
-            oracle_available = True
-            plot_with_bands(
-                ax,
-                oracle_steps,
-                oracle_mean,
-                oracle_std,
-                label="Oracle expected public resolved",
-                color="tab:orange",
+    for epoch in epochs:
+        real_steps, epoch_real_mean, _ = aggregate_sequence_series(realized_series_by_epoch[epoch])
+        if real_steps is None:
+            continue
+        observed_mean_by_epoch[epoch] = epoch_real_mean
+
+        for cfg, initial_state in oracle_inputs_by_epoch.get(epoch, []):
+            oracle = solve_public_resolution_oracle(cfg, initial_state)
+            oracle_mean_by_epoch.setdefault(epoch, [])
+            oracle_mean_by_epoch[epoch].append(
+                np.asarray(oracle["expected_public_resolved_by_time"], dtype=np.float64)
             )
 
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("Publicly Resolved Nodes")
-    ax.set_title("Observed vs Oracle Public Resolution Trajectory")
-    ax.grid(True, alpha=0.3)
-    if ax.lines:
-        ax.legend()
+    oracle_available = False
+    collapsed_oracle_mean_by_epoch: dict[int, np.ndarray] = {}
+    for epoch, series_list in oracle_mean_by_epoch.items():
+        oracle_steps, epoch_oracle_mean, _ = aggregate_mean_std_series(series_list, [])
+        if oracle_steps is not None:
+            oracle_available = True
+            collapsed_oracle_mean_by_epoch[epoch] = epoch_oracle_mean
+
+    plotted_epochs = sorted(observed_mean_by_epoch)
+    max_len = max(
+        max(len(series) for series in observed_mean_by_epoch.values()),
+        max((len(series) for series in collapsed_oracle_mean_by_epoch.values()), default=0),
+    )
+
+    timestep_grid, epoch_grid = np.meshgrid(
+        np.arange(max_len, dtype=np.float64),
+        np.asarray(plotted_epochs, dtype=np.float64),
+    )
+    observed_surface = np.full((len(plotted_epochs), max_len), np.nan, dtype=np.float64)
+    oracle_surface = np.full((len(plotted_epochs), max_len), np.nan, dtype=np.float64)
+
+    real_mean = observed_mean_by_epoch[latest_epoch]
+    oracle_mean = None
+    for row_idx, epoch in enumerate(plotted_epochs):
+        observed_series = observed_mean_by_epoch[epoch]
+        observed_surface[row_idx, :len(observed_series)] = observed_series
+        oracle_series = collapsed_oracle_mean_by_epoch.get(epoch)
+        if oracle_series is not None:
+            oracle_surface[row_idx, :len(oracle_series)] = oracle_series
+            if epoch == latest_epoch:
+                oracle_mean = oracle_series
+
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    wire_rstride = max(1, len(plotted_epochs) // 10)
+    wire_cstride = max(1, max_len // 18)
+
+    ax.plot_surface(
+        timestep_grid,
+        epoch_grid,
+        np.ma.masked_invalid(observed_surface),
+        color="#2563eb",
+        alpha=0.78,
+        linewidth=0,
+        antialiased=True,
+        shade=True,
+    )
+    ax.plot_wireframe(
+        timestep_grid,
+        epoch_grid,
+        np.ma.masked_invalid(observed_surface),
+        rstride=wire_rstride,
+        cstride=wire_cstride,
+        color="#1d4ed8",
+        linewidth=0.5,
+        alpha=0.28,
+    )
+
+    if oracle_available:
+        ax.plot_surface(
+            timestep_grid,
+            epoch_grid,
+            np.ma.masked_invalid(oracle_surface),
+            color="#f59e0b",
+            alpha=0.38,
+            linewidth=0,
+            antialiased=True,
+            shade=True,
+        )
+        ax.plot_wireframe(
+            timestep_grid,
+            epoch_grid,
+            np.ma.masked_invalid(oracle_surface),
+            rstride=wire_rstride,
+            cstride=wire_cstride,
+            color="#d97706",
+            linewidth=0.45,
+            alpha=0.18,
+        )
+
+    ax.set_xlabel("Timestep", labelpad=10)
+    ax.set_ylabel("Eval Epoch", labelpad=12)
+    ax.set_zlabel("Publicly Resolved Nodes", labelpad=10)
+    ax.set_title("Public Resolution Surface Across Eval Epochs")
+    ax.view_init(elev=24, azim=-128)
+    ax.set_xlim(0, max_len - 1)
+    ax.set_ylim(min(plotted_epochs), max(plotted_epochs))
+    ax.set_zlim(bottom=0)
+    ax.set_yticks(select_highlight_epochs(plotted_epochs, max_highlights=6))
+    ax.xaxis.pane.set_alpha(0.06)
+    ax.yaxis.pane.set_alpha(0.06)
+    ax.zaxis.pane.set_alpha(0.06)
+    ax.legend(
+        handles=[
+            Patch(facecolor="#2563eb", edgecolor="#1d4ed8", alpha=0.78, label="Observed surface"),
+            Patch(facecolor="#f59e0b", edgecolor="#d97706", alpha=0.38, label="Oracle surface"),
+        ] if oracle_available else [
+            Patch(facecolor="#2563eb", edgecolor="#1d4ed8", alpha=0.78, label="Observed surface"),
+        ],
+        loc="upper left",
+    )
     fig.tight_layout()
     out_path = os.path.join(plots_dir, "public_resolved_vs_oracle.png")
     fig.savefig(out_path, dpi=150)
@@ -456,11 +562,65 @@ def plot_public_resolved_vs_oracle(results_dir, seed_dirs, plots_dir):
 
     return {
         "n_trajectories": int(used_trajectories),
+        "n_epochs": int(len(epochs)),
+        "latest_epoch": int(latest_epoch),
         "oracle_available": bool(oracle_available),
         "skipped_oracle_seeds": skipped_oracle,
         "observed_final_mean": float(real_mean[-1]),
         "oracle_final_mean": None if not oracle_available else float(oracle_mean[-1]),
     }
+
+
+def _load_seed_config(seed_log_dir: str) -> Optional[object]:
+    metadata_path = os.path.join(seed_log_dir, "run_metadata.json")
+    if not os.path.exists(metadata_path):
+        return None
+    metadata = load_run_metadata(metadata_path)
+    return deserialize_config(metadata["config"])
+
+
+def generate_trajectory_views(results_dir: str, trajectory_records: list[dict]) -> list[dict]:
+    generated = []
+    logs_dir = os.path.join(results_dir, "logs")
+    cfg_cache: dict[str, Optional[object]] = {}
+
+    for record in trajectory_records:
+        seed_dir = record["seed_dir"]
+        if seed_dir not in cfg_cache:
+            cfg_cache[seed_dir] = _load_seed_config(os.path.join(logs_dir, seed_dir))
+        cfg = cfg_cache[seed_dir]
+
+        json_path = record["json_path"]
+        with open(json_path, "r", encoding="utf-8") as handle:
+            trajectory = json.load(handle)
+
+        oracle_series = None
+        if cfg is not None:
+            oracle = solve_public_resolution_oracle(cfg, trajectory["initial_state"])
+            oracle_series = [
+                float(v)
+                for v in oracle.get("expected_public_resolved_by_time", [])
+            ]
+
+        json_stem = Path(json_path).stem
+        html_path = os.path.join(os.path.dirname(json_path), f"{json_stem}_analysis.html")
+        write_trajectory_viewer_html(
+            html_path,
+            trajectory,
+            cfg=cfg,
+            oracle_series=oracle_series,
+            seed_dir=seed_dir,
+            label=f"Trajectory Viewer: {json_stem}",
+        )
+        generated.append({
+            "seed_dir": seed_dir,
+            "json_path": json_path,
+            "html_path": html_path,
+            "label": os.path.basename(html_path),
+        })
+        print(f"Saved {html_path}")
+
+    return generated
 
 
 def write_trajectory_index(results_dir, trajectory_artifacts):
@@ -505,7 +665,7 @@ def main():
     plots_dir = os.path.join(args.results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
-    all_data, seed_dirs, trajectory_artifacts = load_all_seeds(args.results_dir)
+    all_data, seed_dirs, trajectory_records = load_all_seeds(args.results_dir)
     n_seeds = len(seed_dirs)
     print(f"Loaded data from {n_seeds} seeds: {seed_dirs}")
 
@@ -524,7 +684,8 @@ def main():
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Return")
     ax.set_title("MAPPO Eval Return on VAMP")
-    ax.legend()
+    if ax.lines:
+        ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(plots_dir, "eval_return.png"), dpi=150)
@@ -572,6 +733,7 @@ def main():
     plot_query_model_quality(all_data, plots_dir)
     plot_mean_returns(all_data, plots_dir)
     public_resolution_summary = plot_public_resolved_vs_oracle(args.results_dir, seed_dirs, plots_dir)
+    trajectory_artifacts = generate_trajectory_views(args.results_dir, trajectory_records)
     write_trajectory_index(args.results_dir, trajectory_artifacts)
 
     summary_lines = []
@@ -693,6 +855,9 @@ def main():
         summary_lines.append("\nPublic Resolution Trajectory:")
         summary_lines.append(
             f"  Trajectories used: {public_resolution_summary['n_trajectories']}"
+        )
+        summary_lines.append(
+            f"  Eval epochs plotted: {public_resolution_summary['n_epochs']} (latest={public_resolution_summary['latest_epoch']})"
         )
         summary_lines.append(
             f"  Observed final public resolved: {public_resolution_summary['observed_final_mean']:.4f}"

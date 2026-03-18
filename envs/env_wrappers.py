@@ -117,6 +117,30 @@ class ShareVecEnv(ABC):
         return self.viewer
 
 
+def _attach_terminal_snapshot(info, terminal_snapshot):
+    """Copy terminal state into step info before an auto-reset occurs."""
+    if terminal_snapshot is None:
+        return info
+
+    if isinstance(info, list):
+        augmented = []
+        for item in info:
+            if isinstance(item, dict):
+                merged = dict(item)
+                merged["terminal_snapshot"] = terminal_snapshot
+                augmented.append(merged)
+            else:
+                augmented.append(item)
+        return augmented
+
+    if isinstance(info, dict):
+        merged = dict(info)
+        merged["terminal_snapshot"] = terminal_snapshot
+        return merged
+
+    return info
+
+
 def shareworker(remote, parent_remote, env_fn_wrapper):
     parent_remote.close()
     env = env_fn_wrapper.x()
@@ -124,13 +148,17 @@ def shareworker(remote, parent_remote, env_fn_wrapper):
         cmd, data = remote.recv()
         if cmd == "step":
             ob, s_ob, reward, done, info, available_actions = env.step(data)
+            terminal_snapshot = None
             if "bool" in done.__class__.__name__:
                 if done:
+                    terminal_snapshot = env.snapshot()
                     ob, s_ob, available_actions = env.reset()
             else:
                 if np.all(done):
+                    terminal_snapshot = env.snapshot()
                     ob, s_ob, available_actions = env.reset()
 
+            info = _attach_terminal_snapshot(info, terminal_snapshot)
             remote.send((ob, s_ob, reward, done, info, available_actions))
         elif cmd == "reset":
             ob, s_ob, available_actions = env.reset()

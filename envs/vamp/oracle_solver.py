@@ -14,12 +14,11 @@ time" that is practical to compute on the current `F_size=8` runs.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import product
 from typing import Dict, List, Optional, Tuple
-
-import numpy as np
 
 from envs.vamp.config import VampConfig
 from envs.vamp.formula_graph import FormulaGraph
@@ -59,6 +58,28 @@ class PublicResolutionOracle:
         self.bit_to_formula = {idx: phi for phi, idx in self.formula_to_bit.items()}
         self.true_count = len(self.true_formulas)
         self.dep_mask_by_bit = self._build_dep_masks()
+
+        # Pre-compute scalar config values to avoid repeated attribute lookups
+        self._lambda_diff = float(cfg.lambda_diff)
+        self._alpha_util = float(cfg.alpha_util)
+        self._kappa = float(cfg.kappa)
+        self._rho_0 = [float(r) for r in cfg.rho_0]
+        self._rho_1 = [float(r) for r in cfg.rho_1]
+        self._budget_levels = tuple(int(b) for b in cfg.budget_levels)
+        self._max_timestep = int(cfg.max_timestep)
+
+        # Pre-compute per-bit difficulty factor: exp(-lambda_diff * difficulty)
+        self._r_diff = {}
+        for bit, phi in self.bit_to_formula.items():
+            self._r_diff[bit] = math.exp(-self._lambda_diff * self.graph.get_difficulty(phi))
+
+        # Pre-compute edge weights between all true formula pairs
+        self._weights: Dict[tuple, float] = {}
+        for src_bit, src_phi in self.bit_to_formula.items():
+            for tgt_bit, tgt_phi in self.bit_to_formula.items():
+                w = self.graph.get_weight(src_phi, tgt_phi)
+                if w > 0.0:
+                    self._weights[(src_bit, tgt_bit)] = w ** self._alpha_util
 
         self.initial_state = self._state_from_snapshot(initial_snapshot)
 
@@ -102,19 +123,17 @@ class PublicResolutionOracle:
     def _count_public(self, public_mask: int) -> int:
         return int(public_mask.bit_count())
 
+    @lru_cache(maxsize=None)
     def _proof_rate(self, agent_id: int, public_mask: int, target_bit: int) -> float:
-        phi = self.bit_to_formula[target_bit]
-        r_diff = float(np.exp(-self.cfg.lambda_diff * self.graph.get_difficulty(phi)))
+        r_diff = self._r_diff[target_bit]
         s_mass = 0.0
-        for source_bit, source_phi in self.bit_to_formula.items():
+        for source_bit in range(self.true_count):
             if public_mask & (1 << source_bit):
-                weight = self.graph.get_weight(source_phi, phi)
-                if weight > 0.0:
-                    s_mass += weight ** self.cfg.alpha_util
-        support = float(np.log1p(s_mass))
-        return r_diff * (
-            float(self.cfg.rho_0[agent_id]) + float(self.cfg.rho_1[agent_id]) * support
-        )
+                w = self._weights.get((source_bit, target_bit))
+                if w is not None:
+                    s_mass += w
+        support = math.log1p(s_mass)
+        return r_diff * (self._rho_0[agent_id] + self._rho_1[agent_id] * support)
 
     def _available_actions(
         self,
@@ -132,9 +151,9 @@ class PublicResolutionOracle:
             deps_mask = self.dep_mask_by_bit[bit]
             if deps_mask & ~public_mask:
                 continue
-            for budget_idx in range(len(self.cfg.budget_levels)):
+            for budget_idx in range(len(self._budget_levels)):
                 actions.append(
-                    OracleAction("prove", formula=int(phi), budget=int(budget_idx))
+                    OracleAction("prove", formula=phi, budget=budget_idx)
                 )
         return actions
 
@@ -151,16 +170,17 @@ class PublicResolutionOracle:
             if next_jobs[agent_id] is not None:
                 continue
             bit = self.formula_to_bit[action.formula]
-            tau = int(self.cfg.budget_levels[action.budget])
+            tau = self._budget_levels[action.budget]
             next_jobs[agent_id] = (bit, tau, tau)
         return public_mask, tuple(next_jobs)
 
+    @lru_cache(maxsize=None)
     def _resolve_step(
         self,
         timestep: int,
         public_mask: int,
         jobs: Tuple[OracleJob, ...],
-    ) -> List[Tuple[float, OracleState]]:
+    ) -> Tuple[Tuple[float, OracleState], ...]:
         completion_events = []
         next_jobs: List[OracleJob] = list(jobs)
 
@@ -168,24 +188,25 @@ class PublicResolutionOracle:
             if job is None:
                 continue
             target_bit, tau_rem, tau_eff = job
-            tau_after = int(tau_rem) - 1
+            tau_after = tau_rem - 1
             if tau_after <= 0:
                 rate = self._proof_rate(agent_id, public_mask, target_bit)
-                p_success = float(
-                    np.clip(1.0 - np.exp(-rate * (float(tau_eff) ** self.cfg.kappa)), 0.0, 1.0)
-                )
+                exponent = rate * (tau_eff ** self._kappa)
+                p_success = max(0.0, min(1.0, 1.0 - math.exp(-exponent)))
                 completion_events.append((target_bit, p_success))
                 next_jobs[agent_id] = None
             else:
-                next_jobs[agent_id] = (target_bit, tau_after, int(tau_eff))
+                next_jobs[agent_id] = (target_bit, tau_after, tau_eff)
+
+        next_jobs_t = tuple(next_jobs)
 
         if not completion_events:
-            return [(1.0, (timestep + 1, public_mask, tuple(next_jobs)))]
+            return ((1.0, (timestep + 1, public_mask, next_jobs_t)),)
 
         branches: List[Tuple[float, OracleState]] = []
         for outcome_bits in product((0, 1), repeat=len(completion_events)):
             prob = 1.0
-            next_public_mask = int(public_mask)
+            next_public_mask = public_mask
             for bit_outcome, (target_bit, p_success) in zip(outcome_bits, completion_events):
                 if bit_outcome:
                     prob *= p_success
@@ -194,19 +215,25 @@ class PublicResolutionOracle:
                     prob *= 1.0 - p_success
             if prob <= 0.0:
                 continue
-            branches.append((prob, (timestep + 1, next_public_mask, tuple(next_jobs))))
-        return branches
+            branches.append((prob, (timestep + 1, next_public_mask, next_jobs_t)))
+        return tuple(branches)
 
     @lru_cache(maxsize=None)
     def _solve_from_state(self, state: OracleState) -> Tuple[float, Tuple[dict, ...]]:
         timestep, public_mask, jobs = state
-        if timestep >= self.cfg.max_timestep:
-            return float(self._count_public(public_mask)), tuple()
+        if timestep >= self._max_timestep:
+            return float(self._count_public(public_mask)), ()
 
         per_agent_actions = [
             self._available_actions(agent_id, public_mask, jobs)
             for agent_id in range(self.n_agents)
         ]
+
+        # Prune: if an agent has prove actions available, drop noop
+        # (noop is dominated — wasting a timestep is never better than trying)
+        for i in range(len(per_agent_actions)):
+            if len(per_agent_actions[i]) > 1:
+                per_agent_actions[i] = [a for a in per_agent_actions[i] if a.kind != "noop"]
 
         best_value: Optional[float] = None
         best_joint_action: Optional[Tuple[dict, ...]] = None
@@ -258,7 +285,7 @@ class PublicResolutionOracle:
                 expected_public_sq += state_prob * (public_count ** 2)
             variance = max(expected_public_sq - expected_public ** 2, 0.0)
             mean_curve.append(float(expected_public))
-            std_curve.append(float(np.sqrt(variance)))
+            std_curve.append(math.sqrt(variance))
             distribution = next_distribution
 
         return mean_curve, std_curve
