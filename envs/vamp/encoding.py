@@ -8,8 +8,10 @@ Action space layout (discrete indices):
     [2*F*B+F+1 .. 2*F*B+2F]             Qry(phi)
     [2*F*B+2F+1]                         MarketNoOp
     [2*F*B+2F+2 .. +F*D*L*P*2]          CreatePost(phi, deadline, loss, price, side)
-    [next .. +MAX_OFFERS]                AcceptOffer(slot)
+    [next .. +MAX_OFFERS*Q]              AcceptOffer(slot, quantity_level)
     [next .. +MAX_OWN_OFFERS]            CancelOffer(slot)
+
+    where Q = number of accept quantity levels (default 3: one, half, all).
 
 Local obs: 14*F + N + 7 + 6*max_offers dims
 Global obs: (4*F + 5 + F) * N + 4*F + 6*max_offers + 1 dims
@@ -24,20 +26,24 @@ import numpy as np
 
 
 VampAction = namedtuple('VampAction', [
-    'type',        # 'noop', 'prove', 'conj', 'pub', 'qry', 'market_noop',
-                   # 'create_post', 'accept', 'cancel'
-    'formula',     # target formula index (or None)
-    'budget',      # budget level index (or None)
-    'deadline',    # deadline level index (or None)
-    'loss',        # loss level index (or None)
-    'side',        # 'long' or 'short' (or None)
-    'price',       # price level index (or None)
-    'offer_slot',  # offer slot index (or None)
+    'type',            # 'noop', 'prove', 'conj', 'pub', 'qry', 'market_noop',
+                       # 'create_post', 'accept', 'cancel'
+    'formula',         # target formula index (or None)
+    'budget',          # budget level index (or None)
+    'deadline',        # deadline level index (or None)
+    'loss',            # loss level index (or None)
+    'side',            # 'long' or 'short' (or None)
+    'price',           # price level index (or None)
+    'offer_slot',      # offer slot index (or None)
+    'accept_quantity', # accept quantity level index (or None): 0=one, 1=half, 2=all
 ])
 
 
 class VampEncoder:
     """Encodes observations and actions for VampEnv."""
+
+    # Accept quantity levels: index -> semantic label
+    ACCEPT_QTY_LEVELS = ['one', 'half', 'all']
 
     def __init__(self, F_size: int, n_agents: int, n_budget_levels: int,
                  n_deadline_levels: int, n_loss_levels: int, n_price_levels: int,
@@ -50,6 +56,7 @@ class VampEncoder:
         self.P = n_price_levels
         self.max_offers = max_offers
         self.max_own_offers = max_own_offers
+        self.Q = len(self.ACCEPT_QTY_LEVELS)
 
         # Compute action space offsets
         self._noop = 0
@@ -65,7 +72,7 @@ class VampEncoder:
         self._create_start = self._market_noop + 1
         self._create_end = self._create_start + self.F * self.D * self.L * self.P * 2
         self._accept_start = self._create_end
-        self._accept_end = self._accept_start + self.max_offers
+        self._accept_end = self._accept_start + self.max_offers * self.Q
         self._cancel_start = self._accept_end
         self._cancel_end = self._cancel_start + self.max_own_offers
 
@@ -81,6 +88,19 @@ class VampEncoder:
             max_offers=cfg.max_offers,
             max_own_offers=cfg.max_own_offers,
         )
+
+    @staticmethod
+    def resolve_accept_quantity(qty_level: int, offer_quantity: int) -> int:
+        """Convert a quantity level index to an actual quantity.
+
+        Levels: 0 = one, 1 = half (rounded up), 2 = all.
+        """
+        if qty_level == 0:
+            return 1
+        if qty_level == 1:
+            return max(1, (offer_quantity + 1) // 2)
+        # qty_level == 2 (all)
+        return offer_quantity
 
     @property
     def action_dim(self) -> int:
@@ -109,30 +129,30 @@ class VampEncoder:
     def decode_action(self, action_idx: int) -> VampAction:
         """Decode a discrete action index into a VampAction."""
         if action_idx == self._noop:
-            return VampAction('noop', None, None, None, None, None, None, None)
+            return VampAction('noop', None, None, None, None, None, None, None, None)
 
         if self._prove_start <= action_idx < self._prove_end:
             idx = action_idx - self._prove_start
             phi = idx // self.B
             tau = idx % self.B
-            return VampAction('prove', phi, tau, None, None, None, None, None)
+            return VampAction('prove', phi, tau, None, None, None, None, None, None)
 
         if self._conj_start <= action_idx < self._conj_end:
             idx = action_idx - self._conj_start
             phi = idx // self.B
             tau = idx % self.B
-            return VampAction('conj', phi, tau, None, None, None, None, None)
+            return VampAction('conj', phi, tau, None, None, None, None, None, None)
 
         if self._pub_start <= action_idx < self._pub_end:
             phi = action_idx - self._pub_start
-            return VampAction('pub', phi, None, None, None, None, None, None)
+            return VampAction('pub', phi, None, None, None, None, None, None, None)
 
         if self._qry_start <= action_idx < self._qry_end:
             phi = action_idx - self._qry_start
-            return VampAction('qry', phi, None, None, None, None, None, None)
+            return VampAction('qry', phi, None, None, None, None, None, None, None)
 
         if action_idx == self._market_noop:
-            return VampAction('market_noop', None, None, None, None, None, None, None)
+            return VampAction('market_noop', None, None, None, None, None, None, None, None)
 
         if self._create_start <= action_idx < self._create_end:
             idx = action_idx - self._create_start
@@ -145,17 +165,19 @@ class VampEncoder:
             deadline_idx = idx % self.D
             phi = idx // self.D
             side = 'long' if side_idx == 0 else 'short'
-            return VampAction('create_post', phi, None, deadline_idx, loss_idx, side, price_idx, None)
+            return VampAction('create_post', phi, None, deadline_idx, loss_idx, side, price_idx, None, None)
 
         if self._accept_start <= action_idx < self._accept_end:
-            slot = action_idx - self._accept_start
-            return VampAction('accept', None, None, None, None, None, None, slot)
+            idx = action_idx - self._accept_start
+            slot = idx // self.Q
+            qty_level = idx % self.Q
+            return VampAction('accept', None, None, None, None, None, None, slot, qty_level)
 
         if self._cancel_start <= action_idx < self._cancel_end:
             slot = action_idx - self._cancel_start
-            return VampAction('cancel', None, None, None, None, None, None, slot)
+            return VampAction('cancel', None, None, None, None, None, None, slot, None)
 
-        return VampAction('noop', None, None, None, None, None, None, None)
+        return VampAction('noop', None, None, None, None, None, None, None, None)
 
     def encode_action(self, action: VampAction) -> int:
         """Encode a VampAction into a discrete index."""
@@ -182,7 +204,8 @@ class VampEncoder:
             )
             return self._create_start + idx
         if action.type == 'accept':
-            return self._accept_start + action.offer_slot
+            qty_level = action.accept_quantity if action.accept_quantity is not None else 0
+            return self._accept_start + action.offer_slot * self.Q + qty_level
         if action.type == 'cancel':
             return self._cancel_start + action.offer_slot
         return self._noop
@@ -259,7 +282,7 @@ class VampEncoder:
                 obs[base + 2] = offer.contract.loss
                 obs[base + 3] = offer.price
                 obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-                obs[base + 5] = offer.quantity / max(cfg.target_init_max_quantity, 1)
+                obs[base + 5] = offer.quantity / max(cfg.bounty_quantity, 1)
         offset += self.max_offers * 6
 
         return obs
@@ -325,7 +348,7 @@ class VampEncoder:
                 obs[base + 2] = offer.contract.loss
                 obs[base + 3] = offer.price
                 obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-                obs[base + 5] = offer.quantity / max(cfg.target_init_max_quantity, 1)
+                obs[base + 5] = offer.quantity / max(cfg.bounty_quantity, 1)
         offset += self.max_offers * 6
 
         # Timestep
@@ -393,12 +416,14 @@ class VampEncoder:
                                     )
                                     avail[idx] = 1.0
 
-            # Accept: available offer slots
+            # Accept: available offer slots x quantity levels
             offer_ids = market.get_offer_ids_sorted()
             for slot_idx in range(min(len(offer_ids), self.max_offers)):
                 offer = market.offers[offer_ids[slot_idx]]
                 if offer.poster != agent_id:
-                    avail[self._accept_start + slot_idx] = 1.0
+                    base = self._accept_start + slot_idx * self.Q
+                    for q in range(self.Q):
+                        avail[base + q] = 1.0
 
             # Cancel: own offers mapped to slots
             own_offers = [oid for oid in offer_ids if market.offers[oid].poster == agent_id]

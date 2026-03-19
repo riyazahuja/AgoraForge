@@ -18,7 +18,7 @@ from envs.vamp.library import Library
 from envs.vamp.proof_kernel import ProofKernel
 from envs.vamp.conjecture_kernel import ConjectureKernel
 from envs.vamp.query_model import QueryModel
-from envs.vamp.market import BilateralContractMarket
+from envs.vamp.market import BilateralContractMarket, Position
 from envs.vamp.encoding import VampEncoder
 
 
@@ -112,49 +112,45 @@ class VampEnv(MultiAgentEnv):
             self.public_library.add_concrete(true_phi)
 
     def _seed_initial_target_offers(self) -> None:
-        """Seed static bounty offers on a subset of public concrete theorems."""
+        """Seed deterministic bounty offers on every initially concrete formula.
+
+        For each concrete formula (including negations), posts a long offer with
+        price=1.0 and quantity=cfg.bounty_quantity.  The bounty agent is given
+        exactly the collateral it needs.
+        """
         cfg = self.cfg
-        if cfg.target_init_prob <= 0.0 or cfg.target_init_max_quantity <= 0:
+        if cfg.bounty_quantity <= 0:
             return
 
-        price_levels = [
-            price for price in cfg.price_levels
-            if cfg.target_init_min_price <= price <= cfg.target_init_max_price
-        ]
-        if not price_levels:
-            clipped_target = min(
-                max(cfg.target_init_min_price, min(cfg.price_levels)),
-                max(cfg.price_levels),
-            )
-            nearest_price = min(cfg.price_levels, key=lambda price: abs(price - clipped_target))
-            price_levels = [nearest_price]
-
-        candidates = [
-            phi
-            for phi in sorted(self.public_library.concrete)
-            if self.graph.is_true(phi) and not self.public_library.is_resolved(phi)
-        ]
-        if not candidates:
-            return
-
-        self.rng.shuffle(candidates)
-        longest_loss = min(cfg.loss_levels) if cfg.loss_levels else 0.25
+        loss = min(cfg.loss_levels) if cfg.loss_levels else 0.25
         deadline = cfg.max_timestep
+        quantity = cfg.bounty_quantity
 
-        for phi in candidates:
-            if len(self.market.offers) >= cfg.max_offers:
-                break
-            if self.rng.random() > cfg.target_init_prob:
+        # Every initially concrete formula and its negation.
+        candidates = set()
+        for phi in sorted(self.public_library.concrete):
+            if self.public_library.is_resolved(phi):
                 continue
-            quantity = int(self.rng.integers(1, cfg.target_init_max_quantity + 1))
-            price = float(self.rng.choice(price_levels))
+            candidates.add(phi)
+            neg_phi = self.graph.neg(phi)
+            if not self.public_library.is_concrete(neg_phi):
+                self.public_library.add_concrete(neg_phi)
+            if not self.public_library.is_resolved(neg_phi):
+                candidates.add(neg_phi)
+
+        # Give the bounty agent exactly enough collateral: each contract ties
+        # up 1.0 * quantity in worst-case liability.
+        needed_collateral = float(len(candidates)) * quantity
+        self.market.cash[self.bounty_agent_id] = needed_collateral
+
+        for phi in sorted(candidates):
             self.market.create_and_post(
                 self.bounty_agent_id,
                 phi,
                 deadline,
-                float(longest_loss),
-                "short",
-                price,
+                float(loss),
+                "short",          # poster keeps short, offers long to acceptors
+                1.0,              # price = 1.0
                 quantity=quantity,
                 ignore_own_offer_limit=True,
             )
@@ -196,7 +192,7 @@ class VampEnv(MultiAgentEnv):
         self.market.reset(
             self.n_agents + 1,
             cfg.initial_cash,
-            initial_cash_overrides={self.bounty_agent_id: cfg.target_init_cash},
+            initial_cash_overrides={self.bounty_agent_id: 0.0},
         )
         self._seed_initial_target_offers()
 
@@ -403,6 +399,7 @@ class VampEnv(MultiAgentEnv):
             "side": action.side,
             "price": None if action.price is None else int(action.price),
             "offer_slot": None if action.offer_slot is None else int(action.offer_slot),
+            "accept_quantity": None if action.accept_quantity is None else int(action.accept_quantity),
         }
 
     def describe_actions(self, actions) -> List[dict]:
@@ -608,7 +605,21 @@ class VampEnv(MultiAgentEnv):
             offer_ids = self.market.get_offer_ids_sorted()
             slot = action.offer_slot
             if slot < len(offer_ids):
-                self.market.accept_offer(agent_id, offer_ids[slot])
+                offer_id = offer_ids[slot]
+                offer = self.market.offers.get(offer_id)
+                if offer is not None:
+                    qty_level = action.accept_quantity if action.accept_quantity is not None else 0
+                    quantity = self.encoder.resolve_accept_quantity(qty_level, offer.quantity)
+                    # Clamp to max affordable quantity
+                    if quantity > 1:
+                        unit_liability = offer.contract.loss if offer.side == 'long' else (1.0 - offer.contract.loss)
+                        cost_per_unit = unit_liability + offer.price
+                        wcb = self.market.worst_case_balance(agent_id)
+                        if cost_per_unit > 0:
+                            affordable = max(0, int(wcb / cost_per_unit))
+                            quantity = min(quantity, affordable)
+                    if quantity > 0:
+                        self.market.accept_offer(agent_id, offer_id, quantity=quantity)
 
         elif action.type == "cancel":
             offer_ids = self.market.get_offer_ids_sorted()

@@ -166,10 +166,12 @@ def _format_action(action: Optional[dict], snapshot: dict, agent_id: int, cfg: A
         )
 
     if action_type == "accept":
+        qty_labels = {0: "one", 1: "half", 2: "all"}
+        qty_tag = qty_labels.get(action.get("accept_quantity"), "one")
         offer = _offer_for_accept(snapshot, action.get("offer_slot"))
         if offer is None:
-            return f"accept(slot {action.get('offer_slot')})"
-        return f"accept({_format_offer_summary(offer, num_theorems)})"
+            return f"accept(slot {action.get('offer_slot')}, qty={qty_tag})"
+        return f"accept({_format_offer_summary(offer, num_theorems)}, qty={qty_tag})"
 
     if action_type == "cancel":
         offer = _offer_for_cancel(snapshot, agent_id, action.get("offer_slot"))
@@ -465,6 +467,20 @@ def build_viewer_payload(
                 "worst_case_balance": worst_case,
                 "holdings": holdings,
                 "offers": offers,
+                "all_offers": [
+                    {
+                        "offer_id": int(offer["offer_id"]),
+                        "target": _formula_label(int(offer["target"]), num_theorems),
+                        "target_raw": int(offer["target"]),
+                        "deadline": int(offer["deadline"]),
+                        "loss": float(offer["loss"]),
+                        "side": offer["side"],
+                        "price": float(offer["price"]),
+                        "quantity": int(offer["quantity"]),
+                        "poster": int(offer["poster"]),
+                    }
+                    for offer in _offer_lookup(current_snapshot)
+                ],
                 "current_actions": current_actions,
                 "previous_actions": previous_actions,
                 "previous_results": previous_result_texts,
@@ -622,9 +638,10 @@ HTML_TEMPLATE = """<!doctype html>
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 18px;
       grid-template-areas:
+        "table table"
         "graph economic"
         "resolved rmse"
-        "table table";
+        "offers .";
     }
     .panel {
       background: var(--panel);
@@ -642,7 +659,10 @@ HTML_TEMPLATE = """<!doctype html>
     .panel.economic { grid-area: economic; }
     .panel.resolved { grid-area: resolved; }
     .panel.rmse { grid-area: rmse; }
+    .panel.offers { grid-area: offers; }
     .panel.table { grid-area: table; }
+    #offersTable { font-size: 13px; }
+    #offersTable td, #offersTable th { padding: 4px 8px; }
     .chart-shell {
       width: 100%;
       overflow: hidden;
@@ -742,11 +762,12 @@ HTML_TEMPLATE = """<!doctype html>
       .layout {
         grid-template-columns: minmax(0, 1fr);
         grid-template-areas:
+          "table"
           "graph"
           "economic"
           "resolved"
           "rmse"
-          "table";
+          "offers";
       }
       .step-readout {
         text-align: left;
@@ -778,6 +799,27 @@ HTML_TEMPLATE = """<!doctype html>
     </div>
 
     <div class="layout" id="layoutRoot">
+      <section class="panel table">
+        <h2>Agent State Table</h2>
+        <div class="table-wrap">
+          <table id="agentTable">
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th class="prev-action-col">Previous Action</th>
+                <th class="prev-result-col">Previous Result</th>
+                <th class="current-action current-action-col">Current Action</th>
+                <th>Cash</th>
+                <th>Worst Case</th>
+                <th>Private Holdings</th>
+                <th>Available Offers</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="panel graph">
         <h2>Library State Graph</h2>
         <div class="graph-shell" id="graphShell">
@@ -809,20 +851,20 @@ HTML_TEMPLATE = """<!doctype html>
         </div>
       </section>
 
-      <section class="panel table">
-        <h2>Agent State Table</h2>
+      <section class="panel offers">
+        <h2>Market Offers</h2>
         <div class="table-wrap">
-          <table id="agentTable">
+          <table id="offersTable">
             <thead>
               <tr>
-                <th>Agent</th>
-                <th class="prev-action-col">Previous Action</th>
-                <th class="prev-result-col">Previous Result</th>
-                <th class="current-action current-action-col">Current Action</th>
-                <th>Cash</th>
-                <th>Worst Case</th>
-                <th>Private Holdings</th>
-                <th>Available Offers</th>
+                <th>ID</th>
+                <th>Formula</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Qty</th>
+                <th>Deadline</th>
+                <th>Loss</th>
+                <th>Poster</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -1286,6 +1328,32 @@ HTML_TEMPLATE = """<!doctype html>
       return `<ul class="contract-list">${items.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
     }
 
+    function renderOffersTable() {
+      const frame = frames[currentFrame];
+      const body = document.querySelector("#offersTable tbody");
+      const offers = frame.all_offers || [];
+      if (offers.length === 0) {
+        body.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center">No offers</td></tr>';
+        return;
+      }
+      body.innerHTML = offers.map(o => {
+        const isAgent = o.poster < payload.num_agents;
+        const posterLabel = isAgent
+          ? `<span class="pill" style="border-color:${agentColors[o.poster]};color:${agentColors[o.poster]}">a_${o.poster}</span>`
+          : `<span class="pill" style="border-color:var(--muted);color:var(--muted)">bounty</span>`;
+        return `<tr>
+          <td>${o.offer_id}</td>
+          <td>${escapeHtml(o.target)}</td>
+          <td>${o.side}</td>
+          <td>${o.price.toFixed(2)}</td>
+          <td>${o.quantity}</td>
+          <td>${o.deadline}</td>
+          <td>${o.loss.toFixed(2)}</td>
+          <td>${posterLabel}</td>
+        </tr>`;
+      }).join("");
+    }
+
     function renderTable() {
       const frame = frames[currentFrame];
       const body = document.querySelector("#agentTable tbody");
@@ -1384,6 +1452,7 @@ HTML_TEMPLATE = """<!doctype html>
       renderGraph();
       renderAllCharts();
       renderTable();
+      renderOffersTable();
     }
 
     stepRange.addEventListener("input", (event) => {

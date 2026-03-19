@@ -131,16 +131,8 @@ def parse_args():
                         help='Optional per-action gas fee applied to any non-noop action')
     parser.add_argument('--publish_resolution_bonus', type=float, default=0.0,
                         help='Optional zero-sum shaping bonus per newly public resolution')
-    parser.add_argument('--target_init_prob', type=float, default=0.5,
-                        help='Probability of seeding a public concrete theorem with a static bounty offer')
-    parser.add_argument('--target_init_min_price', type=float, default=0.1,
-                        help='Minimum offer price for static bounty initialization')
-    parser.add_argument('--target_init_max_price', type=float, default=0.3,
-                        help='Maximum offer price for static bounty initialization')
-    parser.add_argument('--target_init_max_quantity', type=int, default=4,
-                        help='Maximum quantity for static bounty offers at reset')
-    parser.add_argument('--target_init_cash', type=float, default=100.0,
-                        help='Starting cash for the static bounty agent used to seed targets')
+    parser.add_argument('--bounty_quantity', type=int, default=100,
+                        help='Fixed quantity for each initial bounty offer (price=1.0)')
 
     # Architecture
     parser.add_argument('--context_length', type=int, default=1, help='Transformer context length')
@@ -224,11 +216,7 @@ def build_config(args) -> VampConfig:
         query_public_truth_boost=args.query_public_truth_boost,
         operation_gas_fee=args.operation_gas_fee,
         publish_resolution_bonus=args.publish_resolution_bonus,
-        target_init_prob=args.target_init_prob,
-        target_init_min_price=args.target_init_min_price,
-        target_init_max_price=args.target_init_max_price,
-        target_init_max_quantity=args.target_init_max_quantity,
-        target_init_cash=args.target_init_cash,
+        bounty_quantity=args.bounty_quantity,
     )
 
 

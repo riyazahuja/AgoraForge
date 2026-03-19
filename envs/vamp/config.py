@@ -58,16 +58,12 @@ class VampConfig:
     deadline_levels: List[int] = field(default_factory=lambda: [10, 25, 50])
     loss_levels: List[float] = field(default_factory=lambda: [0.25, 0.5])
     price_levels: List[float] = field(default_factory=lambda: [0.1 * i for i in range(1, 11)])
-    max_offers: int = 8
+    max_offers: int = 16
     max_own_offers: int = 4
 
     operation_gas_fee: float = 0.0
     publish_resolution_bonus: float = 0.0
-    target_init_prob: float = 0.5
-    target_init_min_price: float = 0.1
-    target_init_max_price: float = 0.3
-    target_init_max_quantity: int = 4
-    target_init_cash: float = 100.0
+    bounty_quantity: int = 100           # fixed quantity for each initial bounty offer
 
     # ── 1h. Implementation-side action simplification ──
     h_max: int = 0
@@ -109,12 +105,7 @@ class VampConfig:
         assert 0.0 <= self.initial_public_concrete_prob <= 1.0
         assert self.operation_gas_fee >= 0.0
         assert self.publish_resolution_bonus >= 0.0
-        assert 0.0 <= self.target_init_prob <= 1.0
-        assert 0.0 <= self.target_init_min_price <= 1.0
-        assert 0.0 <= self.target_init_max_price <= 1.0
-        assert self.target_init_min_price <= self.target_init_max_price
-        assert self.target_init_max_quantity >= 0
-        assert self.target_init_cash >= 0.0
+        assert self.bounty_quantity >= 0
         assert self.phi_transform in ('identity', 'log1p')
 
         for name in ('rho_0', 'rho_1', 'eta_0', 'eta_1', 'kappa_conj_0', 'kappa_conj_1'):

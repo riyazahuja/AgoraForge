@@ -70,11 +70,7 @@ def serialize_config(cfg: VampConfig) -> Dict[str, Any]:
         "max_own_offers": int(cfg.max_own_offers),
         "operation_gas_fee": float(cfg.operation_gas_fee),
         "publish_resolution_bonus": float(cfg.publish_resolution_bonus),
-        "target_init_prob": float(cfg.target_init_prob),
-        "target_init_min_price": float(cfg.target_init_min_price),
-        "target_init_max_price": float(cfg.target_init_max_price),
-        "target_init_max_quantity": int(cfg.target_init_max_quantity),
-        "target_init_cash": float(cfg.target_init_cash),
+        "bounty_quantity": int(cfg.bounty_quantity),
         "h_max": int(cfg.h_max),
     }
 
@@ -189,11 +185,7 @@ def deserialize_config(data: Dict[str, Any]) -> VampConfig:
         max_own_offers=int(data["max_own_offers"]),
         operation_gas_fee=float(data["operation_gas_fee"]),
         publish_resolution_bonus=float(data["publish_resolution_bonus"]),
-        target_init_prob=float(data["target_init_prob"]),
-        target_init_min_price=float(data["target_init_min_price"]),
-        target_init_max_price=float(data["target_init_max_price"]),
-        target_init_max_quantity=int(data["target_init_max_quantity"]),
-        target_init_cash=float(data["target_init_cash"]),
+        bounty_quantity=int(data.get("bounty_quantity", 100)),
         h_max=int(data["h_max"]),
     )
 

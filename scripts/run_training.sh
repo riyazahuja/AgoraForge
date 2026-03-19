@@ -48,11 +48,7 @@ for SEED in "${SEEDS[@]}"; do
         --initial_public_concrete_prob 0.5 \
         --publish_resolution_bonus 0.02 \
         --operation_gas_fee 0.0 \
-        --target_init_prob 0.75 \
-        --target_init_min_price 0.1 \
-        --target_init_max_price 0.3 \
-        --target_init_max_quantity 4 \
-        --target_init_cash 100.0 \
+        --bounty_quantity 100 \
         --log_dir "${RESULTS_DIR}/logs/seed_${SEED}/" \
         --save_dir "${RESULTS_DIR}/checkpoints/seed_${SEED}/" \
         2>&1 | tee "${RESULTS_DIR}/train_seed_${SEED}.log"
