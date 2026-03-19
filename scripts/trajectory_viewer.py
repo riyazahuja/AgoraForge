@@ -502,6 +502,9 @@ HTML_TEMPLATE = """<!doctype html>
   <meta charset="utf-8">
   <title>__PAGE_TITLE__</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/webcola@3.4.0/WebCola/cola.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-cola@2.5.1/cytoscape-cola.js"></script>
   <style>
     :root {
       --bg: #f4efe6;
@@ -661,14 +664,10 @@ HTML_TEMPLATE = """<!doctype html>
       border: 1px solid var(--line);
       min-height: 430px;
     }
-    .graph-svg {
+    #cy {
       width: 100%;
       height: 430px;
       display: block;
-      cursor: grab;
-    }
-    .graph-svg.dragging {
-      cursor: grabbing;
     }
     .tooltip {
       position: absolute;
@@ -782,7 +781,8 @@ HTML_TEMPLATE = """<!doctype html>
       <section class="panel graph">
         <h2>Library State Graph</h2>
         <div class="graph-shell" id="graphShell">
-          <svg class="graph-svg" id="graphSvg" viewBox="0 0 960 430"></svg>
+          <div id="cy"></div>
+          <canvas id="cyOverlay" style="position:absolute;top:0;left:0;pointer-events:none;"></canvas>
           <div class="tooltip" id="graphTooltip"></div>
         </div>
         <div class="panel-note" id="graphNote"></div>
@@ -846,14 +846,10 @@ HTML_TEMPLATE = """<!doctype html>
     const playPause = document.getElementById("playPause");
     const layoutRoot = document.getElementById("layoutRoot");
     const tooltip = document.getElementById("graphTooltip");
-    const graphSvg = document.getElementById("graphSvg");
     const graphNote = document.getElementById("graphNote");
     const agentLegend = document.getElementById("agentLegend");
     let currentFrame = 0;
     let autoplayTimer = null;
-    let panX = 0;
-    let panY = 0;
-    let zoom = 1;
 
     summary.textContent = `Seed ${payload.seed_dir || "?"} | thread=${payload.thread_index} | timesteps=${Math.max(frames.length - 1, 0)} | agents=${payload.num_agents}`;
     stepRange.max = Math.max(frames.length - 1, 0);
@@ -874,19 +870,15 @@ HTML_TEMPLATE = """<!doctype html>
 
     function difficultyColor(value) {
       const clamp = Math.max(0, Math.min(1, Number(value) || 0));
-      const low = [216, 46, 57];
-      const mid = [245, 204, 43];
-      const high = [44, 105, 244];
+      const low = [59, 130, 246];
+      const mid = [250, 204, 21];
+      const high = [239, 68, 68];
       const useHigh = clamp >= 0.5;
       const alpha = useHigh ? (clamp - 0.5) / 0.5 : clamp / 0.5;
       const left = useHigh ? mid : low;
       const right = useHigh ? high : mid;
       const rgb = left.map((start, idx) => Math.round(start + (right[idx] - start) * alpha));
       return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-    }
-
-    function midpoint(a, b) {
-      return (a + b) / 2;
     }
 
     function formulaSet(items) {
@@ -932,130 +924,273 @@ HTML_TEMPLATE = """<!doctype html>
 
     function describeGraphAvailability() {
       graphNote.textContent = payload.config_available
-        ? "Hover nodes for detailed state. Drag to pan and use the mouse wheel to zoom."
+        ? "Drag nodes to rearrange (physics responds). Scroll to zoom, drag background to pan."
         : "Run metadata was missing, so the graph falls back to limited defaults.";
     }
 
+    // ---- Striped SVG for private-concrete fill ----
+    function stripesSvg(color) {
+      return "data:image/svg+xml," + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="46" height="46">' +
+        '<rect width="46" height="46" fill="' + color + '"/>' +
+        '<g stroke="rgba(255,255,255,0.55)" stroke-width="3">' +
+        '<line x1="-2" y1="6" x2="6" y2="-2"/><line x1="-2" y1="14" x2="14" y2="-2"/>' +
+        '<line x1="-2" y1="22" x2="22" y2="-2"/><line x1="-2" y1="30" x2="30" y2="-2"/>' +
+        '<line x1="-2" y1="38" x2="38" y2="-2"/><line x1="-2" y1="46" x2="46" y2="-2"/>' +
+        '<line x1="6" y1="48" x2="48" y2="6"/><line x1="14" y1="48" x2="48" y2="14"/>' +
+        '<line x1="22" y1="48" x2="48" y2="22"/><line x1="30" y1="48" x2="48" y2="30"/>' +
+        '<line x1="38" y1="48" x2="48" y2="38"/>' +
+        '</g></svg>'
+      );
+    }
+
+    // ---- Build Cytoscape elements ----
+    const cyElements = [];
+    // Compound parents: one per theorem so phi/not-phi move as a unit
+    const seenTheorems = new Set();
+    formulaNodes.forEach(function(node) {
+      var tid = Number(node.theorem_id);
+      if (!seenTheorems.has(tid)) {
+        seenTheorems.add(tid);
+        cyElements.push({ group: "nodes", data: { id: "t" + tid, isParent: true } });
+      }
+      cyElements.push({
+        group: "nodes",
+        data: {
+          id: "n" + node.phi, parent: "t" + tid,
+          phi: Number(node.phi), label: node.label,
+          difficulty: Number(node.difficulty), truth: Boolean(node.truth),
+          isFalseMember: Boolean(node.is_false_member),
+        },
+        position: { x: node.x, y: node.y },
+      });
+    });
+    utilityEdges.forEach(function(edge, idx) {
+      var w = Number(edge.weight);
+      cyElements.push({
+        group: "edges",
+        data: {
+          id: "e" + idx, source: "n" + edge.source, target: "n" + edge.target,
+          weight: w, label: w.toFixed(2), isDep: w === 1.0,
+        },
+      });
+    });
+
+    // ---- Create Cytoscape with cola live-physics layout ----
+    var cy = cytoscape({
+      container: document.getElementById("cy"),
+      elements: cyElements,
+      userZoomingEnabled: true,
+      userPanningEnabled: true,
+      boxSelectionEnabled: false,
+      minZoom: 0.25,
+      maxZoom: 3.0,
+      style: [
+        // Compound parents: invisible grouping container
+        {
+          selector: "node[?isParent]",
+          style: {
+            "shape": "roundrectangle",
+            "background-opacity": 0,
+            "border-width": 0,
+            "padding": "6px",
+            "label": "",
+          },
+        },
+        // Formula child nodes
+        {
+          selector: "node[^isParent]",
+          style: {
+            "width": 46, "height": 46,
+            "label": "data(label)",
+            "text-valign": "center", "text-halign": "center",
+            "font-size": 13, "font-weight": 700,
+            "color": "#1f1a14",
+            "text-outline-color": "rgba(255,250,242,0.8)", "text-outline-width": 1.5,
+            "background-color": "#ccc",
+            "border-width": 2, "border-color": "#53463a", "border-style": "solid",
+          },
+        },
+        // Edges — slim and elegant
+        {
+          selector: "edge",
+          style: {
+            "width": 1.2, "line-color": "#b5a898",
+            "target-arrow-color": "#b5a898", "target-arrow-shape": "vee",
+            "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.6,
+            "label": "data(label)", "font-size": 9, "color": "#8a7e72",
+            "text-background-color": "#fffaf2", "text-background-opacity": 0.8,
+            "text-background-padding": "2px", "text-rotation": "autorotate",
+          },
+        },
+        { selector: "edge[?isDep]", style: { "width": 2, "opacity": 0.75 } },
+        { selector: "edge[!isDep]", style: { "line-style": "dashed", "line-dash-pattern": [6, 5] } },
+      ],
+      layout: {
+        name: "cola",
+        animate: true,
+        infinite: true,
+        fit: false,
+        ungrabifyWhileSimulating: false,
+        handleDisconnected: true,
+        avoidOverlap: true,
+        nodeSpacing: function() { return 30; },
+        edgeLength: function(edge) {
+          return edge.data("isDep") ? 200 : 180;
+        },
+        convergenceThreshold: 0.001,
+        padding: 50,
+      },
+    });
+
+    // Fit after initial settle
+    setTimeout(function() { cy.fit(undefined, 50); }, 800);
+
+    // ---- Overlay canvas for rings and arcs ----
+    var overlay = document.getElementById("cyOverlay");
+    var overlayCtx = overlay.getContext("2d");
+
+    function resizeOverlay() {
+      var rect = cy.container().getBoundingClientRect();
+      var dpr = window.devicePixelRatio || 1;
+      overlay.width = rect.width * dpr;
+      overlay.height = rect.height * dpr;
+      overlay.style.width = rect.width + "px";
+      overlay.style.height = rect.height + "px";
+      overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function drawOverlay() {
+      resizeOverlay();
+      var w = parseFloat(overlay.style.width);
+      var h = parseFloat(overlay.style.height);
+      overlayCtx.clearRect(0, 0, w, h);
+
+      var frame = frames[currentFrame];
+      var state = buildFrameState(frame);
+
+      cy.nodes("[^isParent]").forEach(function(cyNode) {
+        var phi = cyNode.data("phi");
+        var rp = cyNode.renderedPosition();
+        var rw = cyNode.renderedWidth() / 2;
+        var node = formulaNodes.find(function(n) { return Number(n.phi) === phi; });
+        if (!node) return;
+
+        var isPublicResolved = state.publicResolved.has(phi);
+        var isPrivateResolved = false;
+        for (var a = 0; a < payload.num_agents; a++) {
+          if (state.privateResolved[a].has(phi)) isPrivateResolved = true;
+        }
+
+        // Resolution ring (inner ring, radius = node edge + 4)
+        var ringR = rw + 4;
+        if (isPublicResolved) {
+          overlayCtx.beginPath();
+          overlayCtx.arc(rp.x, rp.y, ringR, 0, 2 * Math.PI);
+          overlayCtx.lineWidth = 4;
+          overlayCtx.strokeStyle = "#16a34a";
+          overlayCtx.setLineDash([]);
+          overlayCtx.stroke();
+        } else if (isPrivateResolved) {
+          overlayCtx.beginPath();
+          overlayCtx.arc(rp.x, rp.y, ringR, 0, 2 * Math.PI);
+          overlayCtx.lineWidth = 4;
+          overlayCtx.strokeStyle = "#16a34a";
+          overlayCtx.setLineDash([5, 4]);
+          overlayCtx.stroke();
+          overlayCtx.setLineDash([]);
+        }
+
+        // Agent touch arcs (outer ring, radius = node edge + 10)
+        var touchAgents = (frame.touched[String(phi)] || []).map(Number);
+        if (touchAgents.length > 0) {
+          var arcR = rw + 10;
+          var total = touchAgents.length;
+          for (var i = 0; i < total; i++) {
+            var startA = (-Math.PI / 2) + (i * 2 * Math.PI / total);
+            var endA = (-Math.PI / 2) + ((i + 1) * 2 * Math.PI / total);
+            overlayCtx.beginPath();
+            overlayCtx.arc(rp.x, rp.y, arcR, startA, endA);
+            overlayCtx.lineWidth = 3.5;
+            overlayCtx.strokeStyle = agentColors[touchAgents[i] % agentColors.length];
+            overlayCtx.stroke();
+          }
+        }
+      });
+    }
+
+    // Redraw overlay whenever Cytoscape renders (pan, zoom, drag, layout tick)
+    cy.on("render", drawOverlay);
+
+    // ---- Tooltip ----
+    cy.on("mouseover", "node[^isParent]", function(event) {
+      var nd = event.target.data();
+      var node = formulaNodes.find(function(n) { return Number(n.phi) === nd.phi; });
+      if (!node) return;
+      tooltip.innerHTML = tooltipHtml(node, buildFrameState(frames[currentFrame]));
+      tooltip.style.display = "block";
+    });
+    cy.on("mousemove", "node[^isParent]", function(event) {
+      var shellRect = document.getElementById("graphShell").getBoundingClientRect();
+      var rp = event.renderedPosition || event.position;
+      tooltip.style.left = (rp.x + 14) + "px";
+      tooltip.style.top = (rp.y + 14) + "px";
+    });
+    cy.on("mouseout", "node[^isParent]", function() { tooltip.style.display = "none"; });
+
+    // ---- renderGraph: update node styles per frame ----
     function renderGraph() {
-      const frame = frames[currentFrame];
-      const state = buildFrameState(frame);
-      const defs = [];
-      defs.push(`
-        <marker id="arrowHead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L0,6 L9,3 z" fill="#8f7f6c"></path>
-        </marker>
-      `);
-      formulaNodes.forEach((node) => {
-        const fill = difficultyColor(node.difficulty);
-        defs.push(`
-          <pattern id="diag-${node.phi}" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
-            <rect width="8" height="8" fill="${fill}" opacity="0.52"></rect>
-            <rect width="4" height="8" fill="rgba(255,255,255,0.55)"></rect>
-          </pattern>
-        `);
-      });
+      var frame = frames[currentFrame];
+      var state = buildFrameState(frame);
+      cy.batch(function() {
+        cy.nodes("[^isParent]").forEach(function(cyNode) {
+          var phi = cyNode.data("phi");
+          var node = formulaNodes.find(function(n) { return Number(n.phi) === phi; });
+          if (!node) return;
 
-      const worldWidth = Math.max(...formulaNodes.map(node => node.x), 300) + 120;
-      const worldHeight = Math.max(...formulaNodes.map(node => node.y), 220) + 120;
-      const edgeParts = [];
-      utilityEdges.forEach((edge) => {
-        const source = formulaNodes.find(node => Number(node.phi) === Number(edge.source));
-        const target = formulaNodes.find(node => Number(node.phi) === Number(edge.target));
-        if (!source || !target) {
-          return;
-        }
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const len = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const offset = 28;
-        const startX = source.x + dx * offset / len;
-        const startY = source.y + dy * offset / len;
-        const endX = target.x - dx * offset / len;
-        const endY = target.y - dy * offset / len;
-        const midX = midpoint(startX, endX);
-        const midY = midpoint(startY, endY);
-        const weight = Number(edge.weight);
-        const strokeWidth = weight === 1 ? 4.5 : 1.5 + weight * 2.5;
-        const dash = weight === 1 ? "" : `stroke-dasharray="6 5"`;
-        edgeParts.push(`
-          <g>
-            <line x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}" stroke="#8f7f6c" stroke-width="${strokeWidth}" ${dash} marker-end="url(#arrowHead)" opacity="0.9"></line>
-            <text x="${midX}" y="${midY - 6}" font-size="12" fill="#655d52" text-anchor="middle">${weight.toFixed(2)}</text>
-          </g>
-        `);
-      });
-
-      const nodeParts = formulaNodes.map((node) => {
-        const phi = Number(node.phi);
-        const isPublicConcrete = state.publicConcrete.has(phi);
-        const isPublicResolved = state.publicResolved.has(phi);
-        const privateConcreteAgents = [];
-        const privateResolvedAgents = [];
-        for (let agentId = 0; agentId < payload.num_agents; agentId += 1) {
-          if (state.privateResolved[agentId].has(phi)) {
-            privateResolvedAgents.push(agentId);
-          } else if (state.privateConcrete[agentId].has(phi)) {
-            privateConcreteAgents.push(agentId);
+          var isPublicConcrete = state.publicConcrete.has(phi);
+          var isPublicResolved = state.publicResolved.has(phi);
+          var isPrivateConcrete = false;
+          for (var a = 0; a < payload.num_agents; a++) {
+            if (state.privateConcrete[a].has(phi)) isPrivateConcrete = true;
           }
-        }
-        const privateConcreteOnly = !isPublicConcrete && privateConcreteAgents.length > 0;
-        const privateResolvedOnly = !isPublicResolved && privateResolvedAgents.length > 0;
-        const opacity = isPublicConcrete ? 1.0 : (privateConcreteOnly ? 0.72 : 0.25);
-        const fill = privateConcreteOnly ? `url(#diag-${phi})` : difficultyColor(node.difficulty);
-        const dash = node.is_false_member ? `stroke-dasharray="7 5"` : "";
-        const touchAgents = (frame.touched[String(phi)] || []).map(Number);
+          // Ghost = not concrete in any library (public or private)
+          var isGhost = !isPublicConcrete && !isPrivateConcrete;
 
-        const touchArcs = touchAgents.map((agentId, idx) => {
-          const total = Math.max(touchAgents.length, 1);
-          const startAngle = (-90 + (idx * 360 / total)) * Math.PI / 180;
-          const endAngle = (-90 + ((idx + 1) * 360 / total)) * Math.PI / 180;
-          const radius = 34;
-          const startX = node.x + radius * Math.cos(startAngle);
-          const startY = node.y + radius * Math.sin(startAngle);
-          const endX = node.x + radius * Math.cos(endAngle);
-          const endY = node.y + radius * Math.sin(endAngle);
-          const large = (endAngle - startAngle) > Math.PI ? 1 : 0;
-          return `<path d="M ${startX} ${startY} A ${radius} ${radius} 0 ${large} 1 ${endX} ${endY}" fill="none" stroke="${agentColors[agentId % agentColors.length]}" stroke-width="4"></path>`;
-        }).join("");
+          // Shape: diamond for ghost, circle for concrete
+          var shape = isGhost ? "diamond" : "ellipse";
 
-        return `
-          <g class="graph-node" data-phi="${phi}">
-            ${isPublicResolved ? `<circle cx="${node.x}" cy="${node.y}" r="26" fill="none" stroke="#16a34a" stroke-width="6"></circle>` : ""}
-            ${privateResolvedOnly ? `<circle cx="${node.x}" cy="${node.y}" r="26" fill="none" stroke="#16a34a" stroke-width="6" stroke-dasharray="4 3" opacity="0.85"></circle>` : ""}
-            ${touchArcs}
-            <circle cx="${node.x}" cy="${node.y}" r="20" fill="${fill}" fill-opacity="${opacity}" stroke="#53463a" stroke-width="2.4" ${dash}></circle>
-            <text x="${node.x}" y="${node.y + 4}" font-size="12" fill="#1f1a14" text-anchor="middle" font-weight="700">${escapeHtml(node.label)}</text>
-          </g>
-        `;
-      }).join("");
+          // Fill
+          var dColor = difficultyColor(node.difficulty);
+          var styles = { "shape": shape };
 
-      graphSvg.innerHTML = `
-        <defs>${defs.join("")}</defs>
-        <g id="graphWorld" transform="translate(${panX}, ${panY}) scale(${zoom})">
-          ${edgeParts.join("")}
-          ${nodeParts}
-        </g>
-      `;
-
-      graphSvg.querySelectorAll(".graph-node").forEach((element) => {
-        element.addEventListener("mouseenter", (event) => {
-          const phi = Number(event.currentTarget.getAttribute("data-phi"));
-          const node = formulaNodes.find(item => Number(item.phi) === phi);
-          if (!node) {
-            return;
+          if (isGhost) {
+            styles["background-color"] = "#d4d0cb";
+            styles["background-opacity"] = 0.45;
+            styles["background-image"] = "none";
+          } else if (isPrivateConcrete && !isPublicConcrete) {
+            // Striped difficulty fill
+            styles["background-color"] = dColor;
+            styles["background-opacity"] = 1;
+            styles["background-image"] = stripesSvg(dColor);
+            styles["background-fit"] = "cover";
+            styles["background-clip"] = "node";
+          } else {
+            // Public concrete — solid difficulty fill
+            styles["background-color"] = dColor;
+            styles["background-opacity"] = 1;
+            styles["background-image"] = "none";
           }
-          tooltip.innerHTML = tooltipHtml(node, state);
-          tooltip.style.display = "block";
-        });
-        element.addEventListener("mousemove", (event) => {
-          const shellRect = document.getElementById("graphShell").getBoundingClientRect();
-          tooltip.style.left = `${event.clientX - shellRect.left + 14}px`;
-          tooltip.style.top = `${event.clientY - shellRect.top + 14}px`;
-        });
-        element.addEventListener("mouseleave", () => {
-          tooltip.style.display = "none";
+
+          // Border: dashed exclusively for false members, solid otherwise
+          styles["border-style"] = node.is_false_member ? "dashed" : "solid";
+          styles["border-color"] = isGhost ? "#a39e96" : "#53463a";
+          styles["border-width"] = 2;
+
+          cyNode.style(styles);
         });
       });
+      // Overlay is redrawn automatically via cy "render" event
     }
 
     function axisText(x, y, text, anchor = "middle") {
@@ -1282,35 +1417,6 @@ HTML_TEMPLATE = """<!doctype html>
         renderCurrentFrame();
       }, 1000);
     });
-
-    let dragState = null;
-    graphSvg.addEventListener("mousedown", (event) => {
-      dragState = {
-        x: event.clientX,
-        y: event.clientY,
-        panX,
-        panY,
-      };
-      graphSvg.classList.add("dragging");
-    });
-    window.addEventListener("mouseup", () => {
-      dragState = null;
-      graphSvg.classList.remove("dragging");
-    });
-    window.addEventListener("mousemove", (event) => {
-      if (!dragState) {
-        return;
-      }
-      panX = dragState.panX + (event.clientX - dragState.x);
-      panY = dragState.panY + (event.clientY - dragState.y);
-      renderGraph();
-    });
-    graphSvg.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      const delta = event.deltaY < 0 ? 1.1 : 0.92;
-      zoom = Math.max(0.45, Math.min(zoom * delta, 2.4));
-      renderGraph();
-    }, { passive: false });
 
     renderLegend();
     describeGraphAvailability();

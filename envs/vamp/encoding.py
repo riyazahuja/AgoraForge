@@ -352,7 +352,7 @@ class VampEncoder:
                 for b in range(self.B):
                     # Prove: allow any unresolved target whose dependencies are currently met.
                     # The proof kernel itself decides whether the attempt can succeed.
-                    if not lib.is_resolved(phi):
+                    if not lib.is_resolved(phi) and lib.is_concrete(phi):
                         deps = graph.get_deps(phi)
                         if deps.issubset(lib.resolved_formulas()):
                             avail[self._prove_start + phi * self.B + b] = 1.0
@@ -365,9 +365,10 @@ class VampEncoder:
             if lib.is_resolved(phi) and not env_state['public_library'].is_resolved(phi):
                 avail[self._pub_start + phi] = 1.0
 
-        # Qry: can query any formula
+        # Qry: can query any concrete formula
         for phi in range(self.F):
-            avail[self._qry_start + phi] = 1.0
+            if lib.is_concrete(phi):
+                avail[self._qry_start + phi] = 1.0
 
         # Market NoOp always available
         avail[self._market_noop] = 1.0

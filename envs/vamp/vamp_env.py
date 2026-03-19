@@ -532,6 +532,9 @@ class VampEnv(MultiAgentEnv):
                     closed_r - self.public_library.resolved_formulas()
                 )
                 self.public_library.merge_from(lib, closed_c, closed_r)
+                for j in range(self.n_agents):
+                    if j != agent_id:
+                        self.libraries[j].merge_from(lib, closed_c, closed_r)
                 for resolved_phi in newly_public:
                     for qm in self.query_models.values():
                         qm.observe_public_resolution(self.graph, resolved_phi)
