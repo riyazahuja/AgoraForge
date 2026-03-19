@@ -345,8 +345,10 @@ class VampEncoder:
 
         # NoOp always available
         avail[self._noop] = 1.0
+        # Market NoOp always available
+        avail[self._market_noop] = 1.0
 
-        # Prove/Conj only if no active job
+        # Prove/Conj/Pub/Qry/Market only if no active job
         if job is None:
             for phi in range(self.F):
                 for b in range(self.B):
@@ -356,50 +358,51 @@ class VampEncoder:
                         deps = graph.get_deps(phi)
                         if deps.issubset(lib.resolved_formulas()):
                             avail[self._prove_start + phi * self.B + b] = 1.0
-                    # Conj: must have ghost formulas
-                    if not lib.is_concrete(phi):
+                    # Conj: anchor must be concrete
+                    if lib.is_concrete(phi):
                         avail[self._conj_start + phi * self.B + b] = 1.0
 
-        # Pub: can publish any privately resolved formula
-        for phi in range(self.F):
-            if lib.is_resolved(phi) and not env_state['public_library'].is_resolved(phi):
-                avail[self._pub_start + phi] = 1.0
+            pub_lib = env_state['public_library']
 
-        # Qry: can query any concrete formula
-        for phi in range(self.F):
-            if lib.is_concrete(phi):
-                avail[self._qry_start + phi] = 1.0
-
-        # Market NoOp always available
-        avail[self._market_noop] = 1.0
-
-        # CreatePost: check collateral and offer limits
-        if market._agent_offer_count(agent_id) < self.max_own_offers and len(market.offers) < self.max_offers:
+            # Pub: can publish any privately resolved formula
             for phi in range(self.F):
-                for d in range(self.D):
-                    for l in range(self.L):
-                        for p in range(self.P):
-                            for side_idx in range(2):
-                                idx = (
-                                    self._create_start
-                                    + phi * self.D * self.L * self.P * 2
-                                    + d * self.L * self.P * 2
-                                    + l * self.P * 2
-                                    + p * 2
-                                    + side_idx
-                                )
-                                avail[idx] = 1.0
+                if lib.is_resolved(phi) and not pub_lib.is_resolved(phi):
+                    avail[self._pub_start + phi] = 1.0
 
-        # Accept: available offer slots
-        offer_ids = market.get_offer_ids_sorted()
-        for slot_idx in range(min(len(offer_ids), self.max_offers)):
-            offer = market.offers[offer_ids[slot_idx]]
-            if offer.poster != agent_id:
-                avail[self._accept_start + slot_idx] = 1.0
+            # Qry: can query any concrete formula
+            for phi in range(self.F):
+                if lib.is_concrete(phi):
+                    avail[self._qry_start + phi] = 1.0
 
-        # Cancel: own offers mapped to slots
-        own_offers = [oid for oid in offer_ids if market.offers[oid].poster == agent_id]
-        for slot_idx in range(min(len(own_offers), self.max_own_offers)):
-            avail[self._cancel_start + slot_idx] = 1.0
+            # CreatePost: check collateral and offer limits; target must be publicly concrete
+            if market._agent_offer_count(agent_id) < self.max_own_offers and len(market.offers) < self.max_offers:
+                for phi in range(self.F):
+                    if not pub_lib.is_concrete(phi):
+                        continue
+                    for d in range(self.D):
+                        for l in range(self.L):
+                            for p in range(self.P):
+                                for side_idx in range(2):
+                                    idx = (
+                                        self._create_start
+                                        + phi * self.D * self.L * self.P * 2
+                                        + d * self.L * self.P * 2
+                                        + l * self.P * 2
+                                        + p * 2
+                                        + side_idx
+                                    )
+                                    avail[idx] = 1.0
+
+            # Accept: available offer slots
+            offer_ids = market.get_offer_ids_sorted()
+            for slot_idx in range(min(len(offer_ids), self.max_offers)):
+                offer = market.offers[offer_ids[slot_idx]]
+                if offer.poster != agent_id:
+                    avail[self._accept_start + slot_idx] = 1.0
+
+            # Cancel: own offers mapped to slots
+            own_offers = [oid for oid in offer_ids if market.offers[oid].poster == agent_id]
+            for slot_idx in range(min(len(own_offers), self.max_own_offers)):
+                avail[self._cancel_start + slot_idx] = 1.0
 
         return avail

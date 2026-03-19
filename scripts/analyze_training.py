@@ -400,11 +400,15 @@ def aggregate_mean_std_series(mean_series_list, std_series_list):
     return steps, mean, std
 
 
-def load_latest_eval_trajectory_paths(seed_log_dir: str):
+def load_all_eval_trajectory_paths(seed_log_dir: str):
     by_epoch = load_eval_trajectory_paths_by_epoch(seed_log_dir)
     if not by_epoch:
         return []
-    return sorted(by_epoch[max(by_epoch)])
+    return sorted(p for paths in by_epoch.values() for p in paths)
+
+
+def load_latest_eval_trajectory_paths(seed_log_dir: str):
+    return load_all_eval_trajectory_paths(seed_log_dir)
 
 
 def load_eval_trajectory_paths_by_epoch(seed_log_dir: str) -> dict[int, list[str]]:

@@ -458,7 +458,7 @@ class VampEnv(MultiAgentEnv):
 
         # 1. Settle expired contracts
         public_resolved = self.public_library.resolved_formulas()
-        self.market.settle(self.timestep, public_resolved)
+        self.market.settle(self.timestep, public_resolved, neg_fn=self.cfg.neg)
 
         # 2. Process market actions
         for i in range(self.n_agents):
@@ -514,6 +514,8 @@ class VampEnv(MultiAgentEnv):
 
         elif action.type == "conj" and self.jobs[agent_id] is None:
             phi = action.formula
+            if not lib.is_concrete(phi):
+                return 0
             tau = cfg.budget_levels[action.budget]
             self.jobs[agent_id] = {
                 "type": "conj",
@@ -525,6 +527,8 @@ class VampEnv(MultiAgentEnv):
             return 0
 
         elif action.type == "pub":
+            if self.jobs[agent_id] is not None:
+                return 0
             phi = action.formula
             if lib.is_resolved(phi):
                 closed_c, closed_r = lib.dependency_closure({phi})
@@ -542,6 +546,8 @@ class VampEnv(MultiAgentEnv):
             return 0
 
         elif action.type == "qry":
+            if self.jobs[agent_id] is not None:
+                return 0
             phi = action.formula
             qm = self.query_models[agent_id]
             p_hat, tau_hat = qm.query(self.graph, lib, phi)
@@ -582,10 +588,14 @@ class VampEnv(MultiAgentEnv):
 
     def _process_market_action(self, agent_id: int, action) -> None:
         """Process market portion of an agent's action."""
+        if self.jobs[agent_id] is not None:
+            return
         cfg = self.cfg
 
         if action.type == "create_post":
             phi = action.formula
+            if not self.public_library.is_concrete(phi):
+                return
             deadline = cfg.deadline_levels[action.deadline]
             loss = cfg.loss_levels[action.loss]
             side = action.side

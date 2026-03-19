@@ -19,7 +19,7 @@ Contract lifecycle:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 import numpy as np
 
 
@@ -259,19 +259,32 @@ class BilateralContractMarket:
         del self.offers[offer_id]
         return True
 
-    def settle(self, timestep: int, resolved_set: Set[int]) -> None:
-        """Settle all contracts whose deadline has passed or target is resolved."""
+    def settle(self, timestep: int, resolved_set: Set[int],
+               neg_fn: Optional[Callable[[int], int]] = None) -> None:
+        """Settle contracts whose deadline passed, target resolved, or target's negation resolved."""
+        # Build set of formulas that can never resolve (negation is proven)
+        never_resolve: Set[int] = set()
+        if neg_fn is not None:
+            for phi in resolved_set:
+                neg_phi = neg_fn(phi)
+                if neg_phi not in resolved_set:
+                    never_resolve.add(neg_phi)
+
         for agent_id in self.positions:
             for pos in self.positions[agent_id]:
                 if pos.settled:
                     continue
                 c = pos.contract
-                # Contracts should realize as soon as the public event becomes known,
-                # not only at expiry, otherwise proof/publication signals stay delayed.
-                if timestep < c.deadline and c.target not in resolved_set:
+
+                target_resolved = c.target in resolved_set
+                target_never = c.target in never_resolve
+                deadline_passed = timestep >= c.deadline
+
+                if not (target_resolved or target_never or deadline_passed):
                     continue
 
-                is_resolved = c.target in resolved_set
+                # is_resolved is True only if the target itself was proven
+                is_resolved = target_resolved
                 if pos.side == 'long':
                     unit_pnl = (1.0 - c.loss) if is_resolved else (-c.loss)
                 else:
@@ -280,6 +293,14 @@ class BilateralContractMarket:
                 pos.pnl = unit_pnl * pos.quantity
                 self.cash[agent_id] += pos.pnl
                 pos.settled = True
+
+        # Clean up ghost offers (positions settled, offer entry stale)
+        stale_ids = [
+            oid for oid, offer in list(self.offers.items())
+            if self._find_position(offer.poster, offer.contract, offer.side) is None
+        ]
+        for oid in stale_ids:
+            del self.offers[oid]
 
     def get_active_offers(self) -> Dict[int, Offer]:
         """Return all active offers."""
