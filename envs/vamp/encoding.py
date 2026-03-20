@@ -399,10 +399,14 @@ class VampEncoder:
 
             # CreatePost: check collateral and offer limits; target must be publicly concrete
             if market._agent_offer_count(agent_id) < self.max_own_offers and len(market.offers) < self.max_offers:
+                remaining = cfg.max_timestep - env_state['timestep']
                 for phi in range(self.F):
                     if not pub_lib.is_concrete(phi):
                         continue
                     for d in range(self.D):
+                        deadline_val = cfg.deadline_levels[d]
+                        if deadline_val > remaining:
+                            continue  # deadline already expired, skip
                         for l in range(self.L):
                             for p in range(self.P):
                                 for side_idx in range(2):

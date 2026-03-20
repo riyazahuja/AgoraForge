@@ -45,7 +45,11 @@ class Trainer:
         self.device = getattr(config, "device", next(self.raw_model.parameters()).device)
 
         self.optimizer = self.raw_model.configure_optimizers(config, config.learning_rate)
-        self.critic_optimizer = self.raw_critic_model.configure_optimizers(config, config.learning_rate * 10)
+        self.critic_optimizer = self.raw_critic_model.configure_optimizers(config, config.learning_rate * 3)
+
+        self._use_amp = torch.cuda.is_available()
+        self._amp_dtype = torch.bfloat16
+
 
     def _reduce_metrics(self, metric_sums, count):
         values = torch.tensor(
@@ -95,7 +99,7 @@ class Trainer:
             pin_memory=torch.cuda.is_available(),
             drop_last=False,
             batch_size=batch_size,
-            num_workers=self.config.num_workers,
+            num_workers=0,
         )
 
     def train(self, dataset, train_critic=True):
@@ -106,10 +110,11 @@ class Trainer:
         target_model = copy.deepcopy(self.raw_model).to(self.device)
         target_model.train(False)
 
-        def run_epoch(epoch_idx):
+        def run_epoch(epoch_idx, loader):
             model.train(True)
             critic_model.train(train_critic)
-            loader = self._build_loader(dataset, epoch_idx)
+            if hasattr(loader, 'sampler') and hasattr(loader.sampler, 'set_epoch'):
+                loader.sampler.set_epoch(epoch_idx)
 
             metric_sums = {
                 "actor_loss": 0.0,
@@ -141,8 +146,8 @@ class Trainer:
 
                 del r, next_s, next_rtg, done
 
-                with torch.set_grad_enabled(True):
-                    logits = model(o, pre_a, rtg, t)
+                with torch.amp.autocast('cuda', dtype=self._amp_dtype, enabled=self._use_amp):
+                    logits, _ = model(o, pre_a, rtg, t)
                     if config.mode == "offline":
                         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), a.reshape(-1))
                         entropy_info = 0.0
@@ -150,13 +155,16 @@ class Trainer:
                         confidence_info = 0.0
                     elif config.mode == "online":
                         adv = adv.reshape(-1, adv.size(-1))
+                        # Normalize advantages
+                        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
                         logits = logits.masked_fill(ava == 0, -1e10)
                         distri = Categorical(logits=logits.reshape(-1, logits.size(-1)))
                         target_a = a.reshape(-1)
                         log_a = distri.log_prob(target_a).unsqueeze(-1)
 
-                        old_logits = target_model(o, pre_a, rtg, t).detach()
+                        with torch.no_grad(), torch.amp.autocast('cuda', dtype=self._amp_dtype, enabled=self._use_amp):
+                            old_logits, _ = target_model(o, pre_a, rtg, t)
                         old_logits = old_logits.masked_fill(ava == 0, -1e10)
                         old_distri = Categorical(logits=old_logits.reshape(-1, old_logits.size(-1)))
                         old_log_a = old_distri.log_prob(target_a).unsqueeze(-1)
@@ -167,7 +175,7 @@ class Trainer:
                         actor_loss = -torch.min(actor_loss_ori, actor_loss_clip)
 
                         act_entropy = distri.entropy().unsqueeze(-1)
-                        loss = actor_loss - 0.01 * act_entropy
+                        loss = actor_loss - 0.08 * act_entropy
 
                         entropy_info = act_entropy.mean().item()
                         ratio_info = imp_weights.mean().item()
@@ -184,8 +192,8 @@ class Trainer:
 
                 critic_loss_info = 0.0
                 if train_critic:
-                    with torch.set_grad_enabled(True):
-                        v_value = critic_model(s, pre_a, rtg, t)
+                    with torch.amp.autocast('cuda', dtype=self._amp_dtype, enabled=self._use_amp):
+                        v_value, _ = critic_model(s, pre_a, rtg, t)
                         v_clip = v + (v_value - v).clamp(-0.2, 0.2)
                         critic_loss_ori = F.smooth_l1_loss(v_value.view(-1, 1), ret.view(-1, 1), beta=10)
                         critic_loss_clip = F.smooth_l1_loss(v_clip.view(-1, 1), ret.view(-1, 1), beta=10)
@@ -207,7 +215,8 @@ class Trainer:
 
             return self._reduce_metrics(metric_sums, batch_count)
 
+        loader = self._build_loader(dataset, 0)
         actor_loss_ret, critic_loss_ret, entropy, ratio, confidence = 0.0, 0.0, 0.0, 0.0, 0.0
         for epoch in range(config.max_epochs):
-            actor_loss_ret, critic_loss_ret, entropy, ratio, confidence = run_epoch(epoch)
+            actor_loss_ret, critic_loss_ret, entropy, ratio, confidence = run_epoch(epoch, loader)
         return actor_loss_ret, critic_loss_ret, entropy, ratio, confidence

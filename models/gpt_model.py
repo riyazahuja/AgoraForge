@@ -7,7 +7,6 @@ GPT model:
 - the final decoder is a linear projection into a vanilla Softmax classifier
 """
 
-import math
 import logging
 import torch
 import torch.nn as nn
@@ -39,29 +38,33 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        self.key = nn.Linear(config.n_embd, config.n_embd)
-        self.query = nn.Linear(config.n_embd, config.n_embd)
-        self.value = nn.Linear(config.n_embd, config.n_embd)
-        self.attn_drop = nn.Dropout(config.attn_pdrop)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.resid_drop = nn.Dropout(config.resid_pdrop)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
-        self.register_buffer("mask", torch.tril(torch.ones(config.block_size + 1, config.block_size + 1))
-                             .view(1, 1, config.block_size + 1, config.block_size + 1))
         self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.attn_pdrop = config.attn_pdrop
 
-    def forward(self, x, layer_past=None):
+    def forward(self, x, kv_cache=None):
         B, T, C = x.size()
-        k = self.key(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
+        head_dim = C // self.n_head
+        qkv = self.c_attn(x).view(B, T, 3, self.n_head, head_dim)
+        q, k, v = qkv.unbind(dim=2)  # each: (B, T, n_head, head_dim)
+        q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if kv_cache is not None:
+            cached_k, cached_v = kv_cache
+            k = torch.cat([cached_k, k], dim=2)
+            v = torch.cat([cached_v, v], dim=2)
+        new_kv_cache = (k, v)
+
+        dropout_p = self.attn_pdrop if self.training else 0.0
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=(kv_cache is None), dropout_p=dropout_p)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_drop(self.proj(y))
-        return y
+        return y, new_kv_cache
 
 
 class Block(nn.Module):
@@ -77,10 +80,11 @@ class Block(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x, kv_cache=None):
+        attn_out, new_kv_cache = self.attn(self.ln1(x), kv_cache=kv_cache)
+        x = x + attn_out
         x = x + self.mlp(self.ln2(x))
-        return x
+        return x, new_kv_cache
 
 
 class GPT(nn.Module):
@@ -96,7 +100,7 @@ class GPT(nn.Module):
         self.global_pos_emb = nn.Parameter(torch.zeros(1, config.max_timestep + 1, config.n_embd))
         self.drop = nn.Dropout(config.embd_pdrop)
 
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd)
         if model_type == 'actor':
             self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -162,7 +166,7 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=train_config.betas)
         return optimizer
 
-    def forward(self, states, pre_actions, rtgs=None, timesteps=None):
+    def forward(self, states, pre_actions, rtgs=None, timesteps=None, kv_caches=None):
         state_embeddings = self.state_encoder(
             states.reshape(-1, self.state_size).type(torch.float32).contiguous())
         state_embeddings = state_embeddings.reshape(states.shape[0], states.shape[1],
@@ -204,7 +208,13 @@ class GPT(nn.Module):
         position_embeddings = global_pos_emb + context_pos_emb
 
         x = self.drop(token_embeddings + position_embeddings)
-        x = self.blocks(x)
+
+        new_kv_caches = []
+        for i, block in enumerate(self.blocks):
+            layer_cache = kv_caches[i] if kv_caches is not None else None
+            x, new_kv = block(x, kv_cache=layer_cache)
+            new_kv_caches.append(new_kv)
+
         x = self.ln_f(x)
         logits = self.head(x)
 
@@ -217,4 +227,4 @@ class GPT(nn.Module):
         else:
             raise NotImplementedError()
 
-        return logits
+        return logits, new_kv_caches

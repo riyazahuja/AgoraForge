@@ -38,7 +38,7 @@ def sample(model, critic_model, state, obs, sample=False, actions=None, rtgs=Non
     rtgs = rtgs if rtgs.size(1) <= block_size//3 else rtgs[:, -block_size//3:]
     timesteps = timesteps if timesteps.size(1) <= block_size//3 else timesteps[:, -block_size//3:]
 
-    logits = model(obs_cond, pre_actions=actions, rtgs=rtgs, timesteps=timesteps)
+    logits, _ = model(obs_cond, pre_actions=actions, rtgs=rtgs, timesteps=timesteps)
     logits = logits[:, -1, :]
     if available_actions is not None:
         logits[available_actions == 0] = -1e10
@@ -49,7 +49,8 @@ def sample(model, critic_model, state, obs, sample=False, actions=None, rtgs=Non
     else:
         _, a = torch.topk(probs, k=1, dim=-1)
 
-    v = critic_model(state_cond, pre_actions=actions, rtgs=rtgs, timesteps=timesteps).detach()
+    v, _ = critic_model(state_cond, pre_actions=actions, rtgs=rtgs, timesteps=timesteps)
+    v = v.detach()
     v = v[:, -1, :]
 
     return a, v

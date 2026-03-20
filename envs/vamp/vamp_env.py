@@ -435,18 +435,14 @@ class VampEnv(MultiAgentEnv):
             if newly_public > 0 and cfg.publish_resolution_bonus > 0.0:
                 bonus = float(cfg.publish_resolution_bonus) * newly_public
                 shaping_rewards[i] += bonus
-                if self.n_agents > 1:
-                    penalty = bonus / (self.n_agents - 1)
-                    for j in range(self.n_agents):
-                        if j != i:
-                            shaping_rewards[j] -= penalty
 
         # 2. Decrement timers and check completions
         for i in range(self.n_agents):
             if self.jobs[i] is not None:
                 self.jobs[i]["tau_rem"] -= 1
                 if self.jobs[i]["tau_rem"] <= 0:
-                    self._resolve_job(i)
+                    if self._resolve_job(i):
+                        shaping_rewards[i] += cfg.proof_success_bonus
 
         # 3. Update timestep
         self.timestep += 1
@@ -553,11 +549,14 @@ class VampEnv(MultiAgentEnv):
 
         return 0
 
-    def _resolve_job(self, agent_id: int) -> None:
-        """Resolve a completed job (timer reached 0)."""
+    def _resolve_job(self, agent_id: int) -> bool:
+        """Resolve a completed job (timer reached 0).
+
+        Returns True if a proof job succeeded, False otherwise.
+        """
         job = self.jobs[agent_id]
         if job is None:
-            return
+            return False
 
         lib = self.libraries[agent_id]
         phi = job["target"]
@@ -573,6 +572,8 @@ class VampEnv(MultiAgentEnv):
                 deps = self.graph.get_deps(phi)
                 lib.add_resolved(phi, deps, self.timestep, agent_id)
                 qm.observe_private_resolution(self.graph, phi)
+                self.jobs[agent_id] = None
+                return True
 
         elif job["type"] == "conj":
             success, proposal = self.conj_kernel.sample(
@@ -582,6 +583,7 @@ class VampEnv(MultiAgentEnv):
                 lib.add_concrete(proposal)
 
         self.jobs[agent_id] = None
+        return False
 
     def _process_market_action(self, agent_id: int, action) -> None:
         """Process market portion of an agent's action."""
@@ -634,9 +636,9 @@ class VampEnv(MultiAgentEnv):
         fee = float(self.cfg.operation_gas_fee)
         if fee <= 0.0:
             return 0.0
-        if action.type in {"noop", "market_noop"}:
-            return 0.0
-        return -fee
+        if action.type in {"create_post", "accept", "cancel"}:
+            return -fee
+        return 0.0
 
     # ── MultiAgentEnv interface ──
 

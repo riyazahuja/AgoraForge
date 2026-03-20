@@ -10,45 +10,49 @@ class StateActionReturnDataset(Dataset):
     def __init__(self, global_state, local_obs, block_size, actions, done_idxs, rewards, avas, v_values, rtgs, rets,
                  advs, timesteps):
         self.block_size = block_size
-        self.global_state = global_state
-        self.local_obs = local_obs
-        self.actions = actions
         self.done_idxs = done_idxs
-        self.rewards = rewards
-        self.avas = avas
-        self.v_values = v_values
-        self.rtgs = rtgs
-        self.rets = rets
-        self.advs = advs
-        self.timesteps = timesteps
+        self._done_idxs_arr = np.array(done_idxs)
+
+        # Pre-tensorize all arrays for fast __getitem__
+        self.global_state = torch.tensor(np.array(global_state), dtype=torch.float32)
+        self.local_obs = torch.tensor(np.array(local_obs), dtype=torch.float32)
+        self.actions = torch.tensor(np.array(actions), dtype=torch.long)
+        self.rewards = torch.tensor(np.array(rewards), dtype=torch.float32)
+        self.avas = torch.tensor(np.array(avas), dtype=torch.long)
+        self.v_values = torch.tensor(np.array(v_values), dtype=torch.float32)
+        self.rtgs = torch.tensor(np.array(rtgs), dtype=torch.float32)
+        self.rets = torch.tensor(np.array(rets), dtype=torch.float32)
+        self.advs = torch.tensor(np.array(advs), dtype=torch.float32)
+        self.timesteps = torch.tensor(np.array(timesteps), dtype=torch.int64)
 
     def __len__(self):
         return len(self.global_state)
 
     def stats(self):
-        print("max episode length: ", max(np.array(self.done_idxs[1:]) - np.array(self.done_idxs[:-1])))
-        print("min episode length: ", min(np.array(self.done_idxs[1:]) - np.array(self.done_idxs[:-1])))
-        print("max rtgs: ", max(self.rtgs))
-        print("aver episode rtgs: ", np.mean([self.rtgs[i] for i in self.done_idxs[:-1]]))
+        done_arr = self._done_idxs_arr
+        print("max episode length: ", max(done_arr[1:] - done_arr[:-1]))
+        print("min episode length: ", min(done_arr[1:] - done_arr[:-1]))
+        print("max rtgs: ", self.rtgs.max().item())
+        print("aver episode rtgs: ", np.mean([self.rtgs[i].item() for i in self.done_idxs[:-1]]))
 
     @property
     def max_rtgs(self):
-        return max(self.rtgs)[0]
+        return self.rtgs.max().item()
 
     def to_dict(self):
         return {
-            'global_state': copy.deepcopy(self.global_state),
-            'local_obs': copy.deepcopy(self.local_obs),
+            'global_state': self.global_state.numpy().tolist(),
+            'local_obs': self.local_obs.numpy().tolist(),
             'block_size': int(self.block_size),
-            'actions': copy.deepcopy(self.actions),
+            'actions': self.actions.numpy().tolist(),
             'done_idxs': copy.deepcopy(self.done_idxs),
-            'rewards': copy.deepcopy(self.rewards),
-            'avas': copy.deepcopy(self.avas),
-            'v_values': copy.deepcopy(self.v_values),
-            'rtgs': copy.deepcopy(self.rtgs),
-            'rets': copy.deepcopy(self.rets),
-            'advs': copy.deepcopy(self.advs),
-            'timesteps': copy.deepcopy(self.timesteps),
+            'rewards': self.rewards.numpy().tolist(),
+            'avas': self.avas.numpy().tolist(),
+            'v_values': self.v_values.numpy().tolist(),
+            'rtgs': self.rtgs.numpy().tolist(),
+            'rets': self.rets.numpy().tolist(),
+            'advs': self.advs.numpy().tolist(),
+            'timesteps': self.timesteps.numpy().tolist(),
         }
 
     @classmethod
@@ -71,44 +75,45 @@ class StateActionReturnDataset(Dataset):
     def __getitem__(self, idx):
         context_length = self.block_size // 3
         done_idx = idx + context_length
-        for i in self.done_idxs:
-            if i > idx:
-                done_idx = min(int(i), done_idx)
-                break
-        idx = done_idx - context_length
-        states = torch.tensor(np.array(self.global_state[idx:done_idx]), dtype=torch.float32)
-        obss = torch.tensor(np.array(self.local_obs[idx:done_idx]), dtype=torch.float32)
+        # Binary search for the next done boundary after idx
+        pos = np.searchsorted(self._done_idxs_arr, idx, side='right')
+        if pos < len(self._done_idxs_arr):
+            done_idx = min(int(self._done_idxs_arr[pos]), done_idx)
+        # Clamp idx to episode start (don't go before the previous done boundary)
+        ep_start = int(self._done_idxs_arr[pos - 1]) if pos > 0 else 0
+        idx = max(ep_start, done_idx - context_length)
 
-        if done_idx in self.done_idxs:
-            next_states = [np.zeros_like(self.global_state[idx]).tolist()] + self.global_state[idx+1:done_idx] + \
-                          [np.zeros_like(self.global_state[idx]).tolist()]
-            next_states.pop(0)
-            next_rtgs = [np.zeros_like(self.rtgs[idx]).tolist()] + self.rtgs[idx+1:done_idx] + \
-                        [np.zeros_like(self.rtgs[idx]).tolist()]
-            next_rtgs.pop(0)
+        states = self.global_state[idx:done_idx]
+        obss = self.local_obs[idx:done_idx]
+
+        at_done = pos < len(self._done_idxs_arr) and done_idx == int(self._done_idxs_arr[pos])
+        if at_done:
+            zeros_s = torch.zeros_like(self.global_state[idx:idx+1])
+            next_states = torch.cat([self.global_state[idx+1:done_idx], zeros_s], dim=0)
+            zeros_r = torch.zeros_like(self.rtgs[idx:idx+1])
+            next_rtgs = torch.cat([self.rtgs[idx+1:done_idx], zeros_r], dim=0)
         else:
             next_states = self.global_state[idx+1:done_idx+1]
             next_rtgs = self.rtgs[idx+1:done_idx+1]
-        next_states = torch.tensor(next_states, dtype=torch.float32)
-        next_rtgs = torch.tensor(next_rtgs, dtype=torch.float32)
 
-        if idx == 0 or idx in self.done_idxs:
-            pre_actions = [[0]] + self.actions[idx:done_idx-1]
+        is_episode_start = (idx == 0) or (pos > 0 and idx == int(self._done_idxs_arr[pos - 1]))
+        if is_episode_start:
+            zero_act = torch.zeros_like(self.actions[idx:idx+1])
+            pre_actions = torch.cat([zero_act, self.actions[idx:done_idx-1]], dim=0)
         else:
             pre_actions = self.actions[idx-1:done_idx-1]
-        pre_actions = torch.tensor(pre_actions, dtype=torch.long)
-        actions = torch.tensor(self.actions[idx:done_idx], dtype=torch.long)
+        actions = self.actions[idx:done_idx]
 
-        rewards = torch.tensor(self.rewards[idx:done_idx], dtype=torch.float32)
-        avas = torch.tensor(self.avas[idx:done_idx], dtype=torch.long)
-        v_values = torch.tensor(self.v_values[idx:done_idx], dtype=torch.float32)
-        rtgs = torch.tensor(self.rtgs[idx:done_idx], dtype=torch.float32)
-        rets = torch.tensor(self.rets[idx:done_idx], dtype=torch.float32)
-        advs = torch.tensor(self.advs[idx:done_idx], dtype=torch.float32)
-        timesteps = torch.tensor(self.timesteps[idx:done_idx], dtype=torch.int64)
+        rewards = self.rewards[idx:done_idx]
+        avas = self.avas[idx:done_idx]
+        v_values = self.v_values[idx:done_idx]
+        rtgs = self.rtgs[idx:done_idx]
+        rets = self.rets[idx:done_idx]
+        advs = self.advs[idx:done_idx]
+        timesteps = self.timesteps[idx:done_idx]
 
         dones = torch.zeros_like(rewards)
-        if done_idx in self.done_idxs:
+        if at_done:
             dones[-1][0] = 1
 
         return states, obss, actions, rewards, avas, v_values, rtgs, rets, advs, timesteps, pre_actions, next_states, next_rtgs, dones

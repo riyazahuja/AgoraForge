@@ -131,6 +131,8 @@ def parse_args():
                         help='Optional per-action gas fee applied to any non-noop action')
     parser.add_argument('--publish_resolution_bonus', type=float, default=0.0,
                         help='Optional zero-sum shaping bonus per newly public resolution')
+    parser.add_argument('--proof_success_bonus', type=float, default=0.05,
+                        help='Immediate shaping reward when a proof job succeeds')
     parser.add_argument('--bounty_quantity', type=int, default=100,
                         help='Fixed quantity for each initial bounty offer (price=1.0)')
 
@@ -216,6 +218,7 @@ def build_config(args) -> VampConfig:
         query_public_truth_boost=args.query_public_truth_boost,
         operation_gas_fee=args.operation_gas_fee,
         publish_resolution_bonus=args.publish_resolution_bonus,
+        proof_success_bonus=args.proof_success_bonus,
         bounty_quantity=args.bounty_quantity,
     )
 

@@ -63,6 +63,7 @@ class VampConfig:
 
     operation_gas_fee: float = 0.0
     publish_resolution_bonus: float = 0.0
+    proof_success_bonus: float = 0.05    # immediate reward when a proof job succeeds
     bounty_quantity: int = 100           # fixed quantity for each initial bounty offer
 
     # ── 1h. Implementation-side action simplification ──
@@ -105,6 +106,7 @@ class VampConfig:
         assert 0.0 <= self.initial_public_concrete_prob <= 1.0
         assert self.operation_gas_fee >= 0.0
         assert self.publish_resolution_bonus >= 0.0
+        assert self.proof_success_bonus >= 0.0
         assert self.bounty_quantity >= 0
         assert self.phi_transform in ('identity', 'log1p')
 

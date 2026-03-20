@@ -34,21 +34,23 @@ for SEED in "${SEEDS[@]}"; do
         --num_theorems 4 \
         --n_agents 2 \
         --max_timestep 100 \
-        --online_buffer_size 8 \
-        --online_epochs 100 \
-        --online_ppo_epochs 5 \
-        --online_lr 5e-4 \
+        --online_buffer_size 32 \
+        --online_epochs 200 \
+        --online_ppo_epochs 8 \
+        --online_lr 3e-4 \
+        --online_batch_size 4096 \
         --eval_episodes 8 \
         --online_eval_interval 5 \
-        --target_rtgs 2.0 \
-        --n_embd 64 \
-        --n_layer 2 \
-        --n_head 2 \
-        --context_length 5 \
+        --target_rtgs 5.0 \
+        --n_embd 128 \
+        --n_layer 3 \
+        --n_head 4 \
+        --context_length 20 \
         --initial_public_concrete_prob 0.5 \
-        --publish_resolution_bonus 0.02 \
-        --operation_gas_fee 0.0 \
-        --bounty_quantity 100 \
+        --publish_resolution_bonus 0.15 \
+        --operation_gas_fee 0.01 \
+        --proof_success_bonus 0.05 \
+        --bounty_quantity 50 \
         --log_dir "${RESULTS_DIR}/logs/seed_${SEED}/" \
         --save_dir "${RESULTS_DIR}/checkpoints/seed_${SEED}/" \
         2>&1 | tee "${RESULTS_DIR}/train_seed_${SEED}.log"
