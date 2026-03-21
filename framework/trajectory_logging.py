@@ -271,7 +271,7 @@ def _trajectory_html_document(title, payload_json):
       const rows = step.state_after.agents.map((agent, idx) => {{
         const action = step.actions[idx];
         const job = agent.positions.filter(pos => !pos.settled).map(pos =>
-          `${{pos.side}} q=${{pos.quantity}} phi=${{pos.target}} d=${{pos.deadline}} l=${{pos.loss.toFixed(2)}}`
+          `${{pos.side}} q=${{pos.quantity}} phi=${{pos.target}} d=${{pos.deadline}} p=${{pos.price.toFixed(2)}}`
         );
         const resolved = agent.library.resolved.map(item => item.formula);
         return `
@@ -320,8 +320,7 @@ def _trajectory_html_document(title, payload_json):
           <td>${{offer.side}}</td>
           <td>${{offer.target}}</td>
           <td>${{offer.deadline}}</td>
-          <td>${{offer.loss.toFixed(2)}}</td>
-          <td>${{offer.price.toFixed(2)}}</td>
+          <td>${{offer.contract_price.toFixed(2)}}</td>
           <td>${{offer.quantity}}</td>
         </tr>`).join("");
       return `
@@ -333,7 +332,6 @@ def _trajectory_html_document(title, payload_json):
               <th>Side</th>
               <th>Target</th>
               <th>Deadline</th>
-              <th>Loss</th>
               <th>Price</th>
               <th>Qty</th>
             </tr>

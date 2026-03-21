@@ -56,7 +56,6 @@ class VampConfig:
     # ── 1g. Market mechanism ──
     budget_levels: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
     deadline_levels: List[int] = field(default_factory=lambda: [10, 25, 50])
-    loss_levels: List[float] = field(default_factory=lambda: [0.25, 0.5])
     price_levels: List[float] = field(default_factory=lambda: [0.1 * i for i in range(1, 11)])
     max_offers: int = 16
     max_own_offers: int = 4
@@ -64,6 +63,8 @@ class VampConfig:
     operation_gas_fee: float = 0.0
     publish_resolution_bonus: float = 0.0
     proof_success_bonus: float = 0.05    # immediate reward when a proof job succeeds
+    seed_bounty_price: float = 0.1       # price for seeded bounty offers
+    bounty_accept_bonus: float = 0.02    # shaping reward for successful accept
     bounty_quantity: int = 100           # fixed quantity for each initial bounty offer
 
     # ── 1h. Implementation-side action simplification ──
@@ -107,6 +108,8 @@ class VampConfig:
         assert self.operation_gas_fee >= 0.0
         assert self.publish_resolution_bonus >= 0.0
         assert self.proof_success_bonus >= 0.0
+        assert 0.0 < self.seed_bounty_price < 1.0, f"seed_bounty_price must be in (0,1), got {self.seed_bounty_price}"
+        assert self.bounty_accept_bonus >= 0.0
         assert self.bounty_quantity >= 0
         assert self.phi_transform in ('identity', 'log1p')
 
@@ -176,10 +179,6 @@ class VampConfig:
     @property
     def n_deadline_levels(self):
         return len(self.deadline_levels)
-
-    @property
-    def n_loss_levels(self):
-        return len(self.loss_levels)
 
     @property
     def n_price_levels(self):

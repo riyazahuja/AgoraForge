@@ -31,7 +31,7 @@ for SEED in "${SEEDS[@]}"; do
     "${LAUNCHER[@]}" run_madt_vamp.py \
         "${DIST_ARGS[@]}" \
         --seed "${SEED}" \
-        --num_theorems 4 \
+        --num_theorems 8 \
         --n_agents 2 \
         --max_timestep 100 \
         --online_buffer_size 32 \
@@ -48,9 +48,11 @@ for SEED in "${SEEDS[@]}"; do
         --context_length 20 \
         --initial_public_concrete_prob 0.5 \
         --publish_resolution_bonus 0.15 \
-        --operation_gas_fee 0.01 \
+        --operation_gas_fee 0.005 \
         --proof_success_bonus 0.05 \
-        --bounty_quantity 50 \
+        --seed_bounty_price 0.1 \
+        --bounty_accept_bonus 0.02 \
+        --bounty_quantity 20 \
         --log_dir "${RESULTS_DIR}/logs/seed_${SEED}/" \
         --save_dir "${RESULTS_DIR}/checkpoints/seed_${SEED}/" \
         2>&1 | tee "${RESULTS_DIR}/train_seed_${SEED}.log"

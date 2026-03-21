@@ -1,8 +1,8 @@
-"""Market: Collateralized Bilateral Contract Market (Mechanism I) for VAMP.
+"""Market: Binary Security Market for VAMP.
 
-Contract type chi = (target_formula, deadline_T, loss_l):
-    Long payoff:  +(1-l) if resolved by T, else -l
-    Short payoff: -(1-l) if resolved by T, else +l
+Contract type chi = (target_formula, deadline_T, price_p):
+    Long payoff:  +(1-p) if resolved by T, else -p
+    Short payoff: -(1-p) if resolved by T, else +p
 
 Portfolio: (cash, held_positions, posted_offers)
     Worst-case balance: cash - sum max_liability(position) >= 0
@@ -11,7 +11,7 @@ Contract lifecycle:
     1. Create: agent mints BOTH long and short positions in their own portfolio.
        The two sides always net to zero P&L, so no money is created.
     2. Post: one side is placed on the public offer book.
-    3. Accept: the offered position transfers from poster to acceptor; cash paid.
+    3. Accept: the offered position transfers from poster to acceptor (no cash transfer).
     4. Cancel: entire contract dissolved (both positions removed).
     5. Unaccepted expiry: both sides settle in poster's portfolio → net zero.
 """
@@ -25,10 +25,10 @@ import numpy as np
 
 @dataclass
 class ContractType:
-    """Contract specification chi = (target, deadline, loss)."""
+    """Contract specification chi = (target, deadline, price)."""
     target: int         # target formula index
     deadline: int       # T: settlement deadline (timestep)
-    loss: float         # l in [0,1]: loss parameter
+    price: float        # p in [0,1]: binary security price (breakeven probability)
 
 
 @dataclass
@@ -47,13 +47,12 @@ class Offer:
     offer_id: int
     contract: ContractType
     side: str           # 'long' or 'short' — what the ACCEPTOR receives
-    price: float        # price the acceptor pays
     quantity: int       # number of identical units still available
     poster: int         # agent_id of poster
 
 
 class BilateralContractMarket:
-    """Collateralized bilateral contract market."""
+    """Binary security market with collateralized positions."""
 
     def __init__(self, max_offers: int, max_own_offers: int):
         self.max_offers = max_offers
@@ -91,9 +90,9 @@ class BilateralContractMarket:
         if position.settled:
             return 0.0
         if position.side == 'long':
-            unit_liability = position.contract.loss  # worst case: not resolved
+            unit_liability = position.contract.price  # worst case: not resolved, lose p
         else:
-            unit_liability = 1.0 - position.contract.loss  # worst case: resolved
+            unit_liability = 1.0 - position.contract.price  # worst case: resolved, lose 1-p
         return unit_liability * position.quantity
 
     def worst_case_balance(self, agent_id: int) -> float:
@@ -117,7 +116,7 @@ class BilateralContractMarket:
                 and pos.quantity > 0
                 and pos.contract.target == contract.target
                 and pos.contract.deadline == contract.deadline
-                and abs(pos.contract.loss - contract.loss) < 1e-9):
+                and abs(pos.contract.price - contract.price) < 1e-9):
                 return i
         return None
 
@@ -142,13 +141,12 @@ class BilateralContractMarket:
         agent_id: int,
         target: int,
         deadline: int,
-        loss: float,
-        side: str,
         price: float,
+        side: str,
         quantity: int = 1,
         ignore_own_offer_limit: bool = False,
     ) -> Optional[int]:
-        """Create a contract and post one side as an offer.
+        """Create a binary security contract and post one side as an offer.
 
         Mints BOTH long and short positions in the poster's portfolio (net zero
         risk), then posts the counter-side on the offer book.
@@ -164,12 +162,12 @@ class BilateralContractMarket:
                 and self._agent_offer_count(agent_id) >= self.max_own_offers):
             return None
 
-        contract = ContractType(target=target, deadline=deadline, loss=loss)
+        contract = ContractType(target=target, deadline=deadline, price=price)
         poster_pos = Position(contract=contract, side=side, quantity=quantity)
         counter_side = 'short' if side == 'long' else 'long'
         counter_pos = Position(contract=contract, side=counter_side, quantity=quantity)
 
-        # Both sides cost l + (1-l) = 1.0 in worst-case liability
+        # Both sides cost p + (1-p) = 1.0 in worst-case liability
         test_liability = self._max_liability(poster_pos) + self._max_liability(counter_pos)
         if self.worst_case_balance(agent_id) < test_liability:
             return None
@@ -185,7 +183,6 @@ class BilateralContractMarket:
             offer_id=offer_id,
             contract=contract,
             side=counter_side,
-            price=price,
             quantity=quantity,
             poster=agent_id,
         )
@@ -195,7 +192,8 @@ class BilateralContractMarket:
         """Accept an existing offer.
 
         Transfers the offered position from the poster's portfolio to the
-        acceptor's portfolio. Cash is transferred from acceptor to poster.
+        acceptor's portfolio. No cash is transferred — the acceptor only takes
+        on future settlement risk.
         Returns True on success.
         """
         if offer_id not in self.offers:
@@ -211,21 +209,16 @@ class BilateralContractMarket:
         if pos_idx is None:
             return False  # position no longer available
 
-        pos = self.positions[offer.poster][pos_idx]
-
-        # Check collateral for acceptor
-        unit_liability = self._max_liability(Position(pos.contract, pos.side, quantity=1))
-        test_liability = unit_liability * quantity + offer.price * quantity
-        if self.worst_case_balance(agent_id) < test_liability:
+        # Check collateral for acceptor (worst-case liability only, no cash transfer)
+        unit_liability = self._max_liability(Position(offer.contract, offer.side, quantity=1))
+        if self.worst_case_balance(agent_id) < unit_liability * quantity:
             return False
 
         # Transfer position from poster to acceptor
         transferred = self._remove_position_quantity(offer.poster, pos_idx, quantity)
         self.positions[agent_id].append(transferred)
 
-        # Cash transfer
-        self.cash[agent_id] -= offer.price * quantity
-        self.cash[offer.poster] += offer.price * quantity
+        # No cash transfer — binary security model
 
         offer.quantity -= quantity
         if offer.quantity == 0:
@@ -286,9 +279,9 @@ class BilateralContractMarket:
                 # is_resolved is True only if the target itself was proven
                 is_resolved = target_resolved
                 if pos.side == 'long':
-                    unit_pnl = (1.0 - c.loss) if is_resolved else (-c.loss)
+                    unit_pnl = (1.0 - c.price) if is_resolved else (-c.price)
                 else:
-                    unit_pnl = (-(1.0 - c.loss)) if is_resolved else c.loss
+                    unit_pnl = (-(1.0 - c.price)) if is_resolved else c.price
 
                 pos.pnl = unit_pnl * pos.quantity
                 self.cash[agent_id] += pos.pnl

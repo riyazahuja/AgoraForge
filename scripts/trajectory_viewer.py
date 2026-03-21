@@ -111,7 +111,7 @@ def _format_offer_summary(offer: dict, num_theorems: int) -> str:
     return (
         f"{offer['side']} {_formula_label(int(offer['target']), num_theorems)} "
         f"x{int(offer['quantity'])} d={int(offer['deadline'])} "
-        f"loss={_format_float(float(offer['loss']), 2)} @ {_format_float(float(offer['price']), 2)}"
+        f"p={_format_float(float(offer['contract_price']), 2)}"
     )
 
 
@@ -120,7 +120,7 @@ def _format_position_summary(pos: dict, num_theorems: int) -> str:
     return (
         f"{pos['side']} {_formula_label(int(pos['target']), num_theorems)} "
         f"x{int(pos['quantity'])} d={int(pos['deadline'])} "
-        f"loss={_format_float(float(pos['loss']), 2)}{pnl}"
+        f"p={_format_float(float(pos['price']), 2)}{pnl}"
     )
 
 
@@ -149,19 +149,16 @@ def _format_action(action: Optional[dict], snapshot: dict, agent_id: int, cfg: A
 
     if action_type == "create_post":
         deadline = action.get("deadline")
-        loss = action.get("loss")
         price = action.get("price")
         if cfg is not None:
             if deadline is not None:
                 deadline = cfg.deadline_levels[int(deadline)]
-            if loss is not None:
-                loss = cfg.loss_levels[int(loss)]
             if price is not None:
                 price = cfg.price_levels[int(price)]
         return (
             "create("
             f"{_formula_label(int(formula), num_theorems)}, "
-            f"d={deadline}, loss={_format_optional_float(loss, 2)}, "
+            f"d={deadline}, "
             f"{action.get('side')}, p={_format_optional_float(price, 2)})"
         )
 
@@ -269,7 +266,7 @@ def _derive_step_results(step: dict, num_theorems: int) -> List[str]:
                 (
                     pos["target"],
                     pos["deadline"],
-                    pos["loss"],
+                    pos["price"],
                     pos["side"],
                     pos["quantity"],
                 )
@@ -282,7 +279,7 @@ def _derive_step_results(step: dict, num_theorems: int) -> List[str]:
                 and (
                     pos["target"],
                     pos["deadline"],
-                    pos["loss"],
+                    pos["price"],
                     pos["side"],
                     pos["quantity"],
                 ) not in before_positions
@@ -473,9 +470,8 @@ def build_viewer_payload(
                         "target": _formula_label(int(offer["target"]), num_theorems),
                         "target_raw": int(offer["target"]),
                         "deadline": int(offer["deadline"]),
-                        "loss": float(offer["loss"]),
+                        "contract_price": float(offer["contract_price"]),
                         "side": offer["side"],
-                        "price": float(offer["price"]),
                         "quantity": int(offer["quantity"]),
                         "poster": int(offer["poster"]),
                     }
@@ -863,7 +859,6 @@ HTML_TEMPLATE = """<!doctype html>
                 <th>Price</th>
                 <th>Qty</th>
                 <th>Deadline</th>
-                <th>Loss</th>
                 <th>Poster</th>
               </tr>
             </thead>
@@ -1333,7 +1328,7 @@ HTML_TEMPLATE = """<!doctype html>
       const body = document.querySelector("#offersTable tbody");
       const offers = frame.all_offers || [];
       if (offers.length === 0) {
-        body.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center">No offers</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center">No offers</td></tr>';
         return;
       }
       body.innerHTML = offers.map(o => {
@@ -1345,10 +1340,9 @@ HTML_TEMPLATE = """<!doctype html>
           <td>${o.offer_id}</td>
           <td>${escapeHtml(o.target)}</td>
           <td>${o.side}</td>
-          <td>${o.price.toFixed(2)}</td>
+          <td>${o.contract_price.toFixed(2)}</td>
           <td>${o.quantity}</td>
           <td>${o.deadline}</td>
-          <td>${o.loss.toFixed(2)}</td>
           <td>${posterLabel}</td>
         </tr>`;
       }).join("");

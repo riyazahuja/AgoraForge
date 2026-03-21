@@ -114,15 +114,16 @@ class VampEnv(MultiAgentEnv):
     def _seed_initial_target_offers(self) -> None:
         """Seed deterministic bounty offers on every initially concrete formula.
 
-        For each concrete formula (including negations), posts a long offer with
-        price=1.0 and quantity=cfg.bounty_quantity.  The bounty agent is given
-        exactly the collateral it needs.
+        For each concrete formula (including negations), posts a short position
+        (offering long to acceptors) with price=cfg.seed_bounty_price and
+        quantity=cfg.bounty_quantity.  The bounty agent is given exactly the
+        collateral it needs.
         """
         cfg = self.cfg
         if cfg.bounty_quantity <= 0:
             return
 
-        loss = min(cfg.loss_levels) if cfg.loss_levels else 0.25
+        price = cfg.seed_bounty_price
         deadline = cfg.max_timestep
         quantity = cfg.bounty_quantity
 
@@ -139,7 +140,7 @@ class VampEnv(MultiAgentEnv):
                 candidates.add(neg_phi)
 
         # Give the bounty agent exactly enough collateral: each contract ties
-        # up 1.0 * quantity in worst-case liability.
+        # up 1.0 * quantity in worst-case liability (price + (1-price) = 1.0).
         needed_collateral = float(len(candidates)) * quantity
         self.market.cash[self.bounty_agent_id] = needed_collateral
 
@@ -148,9 +149,8 @@ class VampEnv(MultiAgentEnv):
                 self.bounty_agent_id,
                 phi,
                 deadline,
-                float(loss),
+                float(price),
                 "short",          # poster keeps short, offers long to acceptors
-                1.0,              # price = 1.0
                 quantity=quantity,
                 ignore_own_offer_limit=True,
             )
@@ -255,7 +255,7 @@ class VampEnv(MultiAgentEnv):
         return {
             "target": int(pos.contract.target),
             "deadline": int(pos.contract.deadline),
-            "loss": float(pos.contract.loss),
+            "price": float(pos.contract.price),
             "side": pos.side,
             "quantity": int(pos.quantity),
             "settled": bool(pos.settled),
@@ -267,9 +267,8 @@ class VampEnv(MultiAgentEnv):
             "offer_id": int(offer_id),
             "target": int(offer.contract.target),
             "deadline": int(offer.contract.deadline),
-            "loss": float(offer.contract.loss),
+            "contract_price": float(offer.contract.price),
             "side": offer.side,
-            "price": float(offer.price),
             "quantity": int(offer.quantity),
             "poster": int(offer.poster),
         }
@@ -395,7 +394,6 @@ class VampEnv(MultiAgentEnv):
             "formula": None if action.formula is None else int(action.formula),
             "budget": None if action.budget is None else int(action.budget),
             "deadline": None if action.deadline is None else int(action.deadline),
-            "loss": None if action.loss is None else int(action.loss),
             "side": action.side,
             "price": None if action.price is None else int(action.price),
             "offer_slot": None if action.offer_slot is None else int(action.offer_slot),
@@ -456,7 +454,10 @@ class VampEnv(MultiAgentEnv):
         # 2. Process market actions
         for i in range(self.n_agents):
             action = decoded[i]
+            pos_before = len(self.market.positions[i])
             self._process_market_action(i, action)
+            if action.type == "accept" and len(self.market.positions[i]) > pos_before:
+                shaping_rewards[i] += cfg.bounty_accept_bonus
             shaping_rewards[i] += self._action_shaping_reward(action)
 
         # Compute rewards
@@ -596,11 +597,10 @@ class VampEnv(MultiAgentEnv):
             if not self.public_library.is_concrete(phi):
                 return
             deadline = cfg.deadline_levels[action.deadline]
-            loss = cfg.loss_levels[action.loss]
-            side = action.side
             price = cfg.price_levels[action.price]
+            side = action.side
             self.market.create_and_post(
-                agent_id, phi, self.timestep + deadline, loss, side, price
+                agent_id, phi, self.timestep + deadline, price, side
             )
 
         elif action.type == "accept":
@@ -612,13 +612,12 @@ class VampEnv(MultiAgentEnv):
                 if offer is not None:
                     qty_level = action.accept_quantity if action.accept_quantity is not None else 0
                     quantity = self.encoder.resolve_accept_quantity(qty_level, offer.quantity)
-                    # Clamp to max affordable quantity
+                    # Clamp to max affordable quantity (no cash transfer, liability only)
                     if quantity > 1:
-                        unit_liability = offer.contract.loss if offer.side == 'long' else (1.0 - offer.contract.loss)
-                        cost_per_unit = unit_liability + offer.price
+                        unit_liability = offer.contract.price if offer.side == 'long' else (1.0 - offer.contract.price)
                         wcb = self.market.worst_case_balance(agent_id)
-                        if cost_per_unit > 0:
-                            affordable = max(0, int(wcb / cost_per_unit))
+                        if unit_liability > 0:
+                            affordable = max(0, int(wcb / unit_liability))
                             quantity = min(quantity, affordable)
                     if quantity > 0:
                         self.market.accept_offer(agent_id, offer_id, quantity=quantity)
@@ -636,7 +635,7 @@ class VampEnv(MultiAgentEnv):
         fee = float(self.cfg.operation_gas_fee)
         if fee <= 0.0:
             return 0.0
-        if action.type in {"create_post", "accept", "cancel"}:
+        if action.type in {"create_post", "cancel"}:
             return -fee
         return 0.0
 

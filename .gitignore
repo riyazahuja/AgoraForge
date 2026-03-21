@@ -2,5 +2,6 @@
 .vscode
 writeup.tex
 results
+results_old
 **/__pycache__
 .oracle_cache

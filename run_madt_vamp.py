@@ -134,7 +134,11 @@ def parse_args():
     parser.add_argument('--proof_success_bonus', type=float, default=0.05,
                         help='Immediate shaping reward when a proof job succeeds')
     parser.add_argument('--bounty_quantity', type=int, default=100,
-                        help='Fixed quantity for each initial bounty offer (price=1.0)')
+                        help='Fixed quantity for each initial bounty offer')
+    parser.add_argument('--seed_bounty_price', type=float, default=0.1,
+                        help='Binary security price for seeded bounty offers')
+    parser.add_argument('--bounty_accept_bonus', type=float, default=0.02,
+                        help='Shaping reward for successfully accepting a bounty offer')
 
     # Architecture
     parser.add_argument('--context_length', type=int, default=1, help='Transformer context length')
@@ -220,6 +224,8 @@ def build_config(args) -> VampConfig:
         publish_resolution_bonus=args.publish_resolution_bonus,
         proof_success_bonus=args.proof_success_bonus,
         bounty_quantity=args.bounty_quantity,
+        seed_bounty_price=args.seed_bounty_price,
+        bounty_accept_bonus=args.bounty_accept_bonus,
     )
 
 

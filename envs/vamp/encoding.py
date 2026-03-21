@@ -7,14 +7,14 @@ Action space layout (discrete indices):
     [2*F*B+1 .. 2*F*B+F]                Pub(phi)
     [2*F*B+F+1 .. 2*F*B+2F]             Qry(phi)
     [2*F*B+2F+1]                         MarketNoOp
-    [2*F*B+2F+2 .. +F*D*L*P*2]          CreatePost(phi, deadline, loss, price, side)
+    [2*F*B+2F+2 .. +F*D*P*2]            CreatePost(phi, deadline, price, side)
     [next .. +MAX_OFFERS*Q]              AcceptOffer(slot, quantity_level)
     [next .. +MAX_OWN_OFFERS]            CancelOffer(slot)
 
     where Q = number of accept quantity levels (default 3: one, half, all).
 
-Local obs: 14*F + N + 7 + 6*max_offers dims
-Global obs: (4*F + 5 + F) * N + 4*F + 6*max_offers + 1 dims
+Local obs: 14*F + N + 7 + 5*max_offers dims
+Global obs: (4*F + 5 + F) * N + 4*F + 5*max_offers + 1 dims
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ VampAction = namedtuple('VampAction', [
     'formula',         # target formula index (or None)
     'budget',          # budget level index (or None)
     'deadline',        # deadline level index (or None)
-    'loss',            # loss level index (or None)
     'side',            # 'long' or 'short' (or None)
     'price',           # price level index (or None)
     'offer_slot',      # offer slot index (or None)
@@ -46,13 +45,12 @@ class VampEncoder:
     ACCEPT_QTY_LEVELS = ['one', 'half', 'all']
 
     def __init__(self, F_size: int, n_agents: int, n_budget_levels: int,
-                 n_deadline_levels: int, n_loss_levels: int, n_price_levels: int,
+                 n_deadline_levels: int, n_price_levels: int,
                  max_offers: int, max_own_offers: int):
         self.F = F_size
         self.N = n_agents
         self.B = n_budget_levels
         self.D = n_deadline_levels
-        self.L = n_loss_levels
         self.P = n_price_levels
         self.max_offers = max_offers
         self.max_own_offers = max_own_offers
@@ -70,7 +68,7 @@ class VampEncoder:
         self._qry_end = self._qry_start + self.F
         self._market_noop = self._qry_end
         self._create_start = self._market_noop + 1
-        self._create_end = self._create_start + self.F * self.D * self.L * self.P * 2
+        self._create_end = self._create_start + self.F * self.D * self.P * 2
         self._accept_start = self._create_end
         self._accept_end = self._accept_start + self.max_offers * self.Q
         self._cancel_start = self._accept_end
@@ -83,7 +81,6 @@ class VampEncoder:
             n_agents=cfg.n_agents,
             n_budget_levels=cfg.n_budget_levels,
             n_deadline_levels=cfg.n_deadline_levels,
-            n_loss_levels=cfg.n_loss_levels,
             n_price_levels=cfg.n_price_levels,
             max_offers=cfg.max_offers,
             max_own_offers=cfg.max_own_offers,
@@ -114,8 +111,8 @@ class VampEncoder:
         # Per agent: cash(1), worst_case(1), n_positions(1), job_active(1),
         #   query_response_valid(1), own_offer_count(1)
         # Scalar: timestep(1), agent_id one-hot(N)
-        # + market slots: max_offers * 6 (target, deadline, loss, price, side, quantity)
-        return 14 * self.F + 6 + 1 + self.N + self.max_offers * 6
+        # + market slots: max_offers * 5 (target, deadline, price, side, quantity)
+        return 14 * self.F + 6 + 1 + self.N + self.max_offers * 5
 
     @property
     def global_obs_dim(self) -> int:
@@ -123,36 +120,36 @@ class VampEncoder:
         # Per agent scalars: cash(1), worst_case(1), job_active(1), job_formula(1), job_type(1) = 5
         # Per agent: offer_vector(F) = F per agent
         # Global: public_concrete(F), public_resolved(F), truth_map(F), difficulty_map(F) = 4*F
-        # Market: offer_slots(max_offers * 6), timestep(1)
-        return (4 * self.F + 5 + self.F) * self.N + 4 * self.F + self.max_offers * 6 + 1
+        # Market: offer_slots(max_offers * 5), timestep(1)
+        return (4 * self.F + 5 + self.F) * self.N + 4 * self.F + self.max_offers * 5 + 1
 
     def decode_action(self, action_idx: int) -> VampAction:
         """Decode a discrete action index into a VampAction."""
         if action_idx == self._noop:
-            return VampAction('noop', None, None, None, None, None, None, None, None)
+            return VampAction('noop', None, None, None, None, None, None, None)
 
         if self._prove_start <= action_idx < self._prove_end:
             idx = action_idx - self._prove_start
             phi = idx // self.B
             tau = idx % self.B
-            return VampAction('prove', phi, tau, None, None, None, None, None, None)
+            return VampAction('prove', phi, tau, None, None, None, None, None)
 
         if self._conj_start <= action_idx < self._conj_end:
             idx = action_idx - self._conj_start
             phi = idx // self.B
             tau = idx % self.B
-            return VampAction('conj', phi, tau, None, None, None, None, None, None)
+            return VampAction('conj', phi, tau, None, None, None, None, None)
 
         if self._pub_start <= action_idx < self._pub_end:
             phi = action_idx - self._pub_start
-            return VampAction('pub', phi, None, None, None, None, None, None, None)
+            return VampAction('pub', phi, None, None, None, None, None, None)
 
         if self._qry_start <= action_idx < self._qry_end:
             phi = action_idx - self._qry_start
-            return VampAction('qry', phi, None, None, None, None, None, None, None)
+            return VampAction('qry', phi, None, None, None, None, None, None)
 
         if action_idx == self._market_noop:
-            return VampAction('market_noop', None, None, None, None, None, None, None, None)
+            return VampAction('market_noop', None, None, None, None, None, None, None)
 
         if self._create_start <= action_idx < self._create_end:
             idx = action_idx - self._create_start
@@ -160,24 +157,22 @@ class VampEncoder:
             idx //= 2
             price_idx = idx % self.P
             idx //= self.P
-            loss_idx = idx % self.L
-            idx //= self.L
             deadline_idx = idx % self.D
             phi = idx // self.D
             side = 'long' if side_idx == 0 else 'short'
-            return VampAction('create_post', phi, None, deadline_idx, loss_idx, side, price_idx, None, None)
+            return VampAction('create_post', phi, None, deadline_idx, side, price_idx, None, None)
 
         if self._accept_start <= action_idx < self._accept_end:
             idx = action_idx - self._accept_start
             slot = idx // self.Q
             qty_level = idx % self.Q
-            return VampAction('accept', None, None, None, None, None, None, slot, qty_level)
+            return VampAction('accept', None, None, None, None, None, slot, qty_level)
 
         if self._cancel_start <= action_idx < self._cancel_end:
             slot = action_idx - self._cancel_start
-            return VampAction('cancel', None, None, None, None, None, None, slot, None)
+            return VampAction('cancel', None, None, None, None, None, slot, None)
 
-        return VampAction('noop', None, None, None, None, None, None, None, None)
+        return VampAction('noop', None, None, None, None, None, None, None)
 
     def encode_action(self, action: VampAction) -> int:
         """Encode a VampAction into a discrete index."""
@@ -196,9 +191,8 @@ class VampEncoder:
         if action.type == 'create_post':
             side_idx = 0 if action.side == 'long' else 1
             idx = (
-                action.formula * self.D * self.L * self.P * 2
-                + action.deadline * self.L * self.P * 2
-                + action.loss * self.P * 2
+                action.formula * self.D * self.P * 2
+                + action.deadline * self.P * 2
                 + action.price * 2
                 + side_idx
             )
@@ -271,19 +265,18 @@ class VampEncoder:
         obs[offset + agent_id] = 1.0
         offset += self.N
 
-        # Market offer slots (max_offers * 6)
+        # Market offer slots (max_offers * 5)
         offer_ids = market.get_offer_ids_sorted()
         for slot_idx in range(self.max_offers):
-            base = offset + slot_idx * 6
+            base = offset + slot_idx * 5
             if slot_idx < len(offer_ids):
                 offer = market.offers[offer_ids[slot_idx]]
                 obs[base] = offer.contract.target / max(self.F, 1)
                 obs[base + 1] = offer.contract.deadline / max(cfg.max_timestep, 1)
-                obs[base + 2] = offer.contract.loss
-                obs[base + 3] = offer.price
-                obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-                obs[base + 5] = offer.quantity / max(cfg.bounty_quantity, 1)
-        offset += self.max_offers * 6
+                obs[base + 2] = offer.contract.price
+                obs[base + 3] = 1.0 if offer.side == 'long' else 0.0
+                obs[base + 4] = offer.quantity / max(cfg.bounty_quantity, 1)
+        offset += self.max_offers * 5
 
         return obs
 
@@ -337,19 +330,18 @@ class VampEncoder:
             obs[offset + 3] = graph.difficulty_map[phi]
             offset += 4
 
-        # Market offer slots (max_offers * 6)
+        # Market offer slots (max_offers * 5)
         offer_ids = market.get_offer_ids_sorted()
         for slot_idx in range(self.max_offers):
-            base = offset + slot_idx * 6
+            base = offset + slot_idx * 5
             if slot_idx < len(offer_ids):
                 offer = market.offers[offer_ids[slot_idx]]
                 obs[base] = offer.contract.target / max(self.F, 1)
                 obs[base + 1] = offer.contract.deadline / max(cfg.max_timestep, 1)
-                obs[base + 2] = offer.contract.loss
-                obs[base + 3] = offer.price
-                obs[base + 4] = 1.0 if offer.side == 'long' else 0.0
-                obs[base + 5] = offer.quantity / max(cfg.bounty_quantity, 1)
-        offset += self.max_offers * 6
+                obs[base + 2] = offer.contract.price
+                obs[base + 3] = 1.0 if offer.side == 'long' else 0.0
+                obs[base + 4] = offer.quantity / max(cfg.bounty_quantity, 1)
+        offset += self.max_offers * 5
 
         # Timestep
         obs[offset] = env_state['timestep'] / max(cfg.max_timestep, 1)
@@ -407,18 +399,16 @@ class VampEncoder:
                         deadline_val = cfg.deadline_levels[d]
                         if deadline_val > remaining:
                             continue  # deadline already expired, skip
-                        for l in range(self.L):
-                            for p in range(self.P):
-                                for side_idx in range(2):
-                                    idx = (
-                                        self._create_start
-                                        + phi * self.D * self.L * self.P * 2
-                                        + d * self.L * self.P * 2
-                                        + l * self.P * 2
-                                        + p * 2
-                                        + side_idx
-                                    )
-                                    avail[idx] = 1.0
+                        for p in range(self.P):
+                            for side_idx in range(2):
+                                idx = (
+                                    self._create_start
+                                    + phi * self.D * self.P * 2
+                                    + d * self.P * 2
+                                    + p * 2
+                                    + side_idx
+                                )
+                                avail[idx] = 1.0
 
             # Accept: available offer slots x quantity levels
             offer_ids = market.get_offer_ids_sorted()
